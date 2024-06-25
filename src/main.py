@@ -79,7 +79,9 @@ def get_devices_list(server, token):
 
     response = requests.post(
         f'{server}/api/management/v2/inventory/filters/search',
-        headers={'Authorization': f'Bearer {token}'},
+        headers={
+            'Authorization': f'Bearer {token}',
+        },
         json=json_data,
         verify=False
     )
@@ -102,22 +104,21 @@ def print_devices_list(devices):
     """ Print the list of devices
 
     :param devices: The list of devices
+    :return: The filtered devices
     """
 
     rprint('[#7289DA]' + '='*81 + '\n' +
            '================================[bold][#E01E5A] Devices list [/bold][/#E01E5A]===================================')
+
     filtered_devices = []
     id = 0
     for device in devices:
         id += 1
-        if 'timestamp' in device['attributes'][0]:
-            device_name = device['attributes'][0]['value']
-        elif 'timestamp' in device['attributes'][1]:
-            device_name = device['attributes'][1]['value']
-        elif 'timestamp' in device['attributes'][2]:
-            device_name = device['attributes'][2]['value']
-        else:
-            device_name = 'Unknown'
+        device_name = 'Unknown'
+        for attribute in device['attributes']:
+            if 'timestamp' in attribute:
+                device_name = attribute['value']
+                break
         device_id = device['id']
         filtered_devices.append(
             {
@@ -137,8 +138,10 @@ def print_devices_list(devices):
                 device_id})[/italic][/#65656b]' + ' ' * space_to_add + '|'
         )
 
+    return filtered_devices
 
-def print_device_choice():
+
+def print_device_choice(devices):
     """ Print the device choice and ask the user to choose one
 
     :return: The device number
@@ -147,6 +150,9 @@ def print_device_choice():
     rprint('[#7289DA]' + '='*81 + '\n' +
            'Enter the device number you want to interact with: ')
     device_number = int(input())
+    if device_number not in [device['local_id'] for device in devices]:
+        rprint('[bold][red]Error[/bold]: Invalid device number')
+        sys.exit(1)
 
     return device_number
 
@@ -164,6 +170,9 @@ def print_command():
     rprint('  [#7289DA][#E01E5A]2[/#E01E5A] - [bold]port-forward[/bold] - ' +
            '[italic][#65656b]Forward a port from the device to your machine[/italic][/#65656b]')
     command = int(input())
+    if command not in [1, 2]:
+        rprint('[bold][red]Error[/bold]: Invalid command')
+        sys.exit(1)
 
     return command
 
@@ -177,8 +186,14 @@ def print_port_forward():
     rprint('[#7289DA]' + '='*81 + '\n' +
            'Enter the remote port you want to forward: ')
     remote = int(input())
+    if remote < 1 or remote > 65535:
+        rprint('[bold][red]Error[/bold]: Invalid port number')
+        sys.exit(1)
     rprint('[#7289DA]Enter the local port you want to forward to: ')
     local = int(input())
+    if local < 1 or local > 65535:
+        rprint('[bold][red]Error[/bold]: Invalid port number')
+        sys.exit(1)
 
     return local, remote
 
@@ -196,17 +211,33 @@ def check_mender_cli():
 def main():
     """ Main function """
 
+    # Parse the arguments (server URL and API token)
     args = parse_args()
-    check_mender_cli()
-    print_welcome()
-    devices = get_devices_list(args.server, args.token)
 
+    # Check if the mender-cli is installed
+    check_mender_cli()
+
+    # Print the welcome message
+    print_welcome()
+
+    # Main loop to interact with the devices
     while 1:
-        print_devices_list(devices)
-        device = print_device_choice()
+        # Get the list of devices
+        devices = get_devices_list(args.server, args.token)
+
+        # Print the devices list
+        filtered_devices = print_devices_list(devices)
+
+        # Ask the user to choose a device
+        device = print_device_choice(filtered_devices)
+
+        # Ask the user to choose a command
         command = print_command()
+
         try:
+            # Run the reverse shell command
             if command == 1:
+                rprint('[#7289DA]' + '='*81)
                 sp.run(
                     [
                         'mender-cli',
@@ -219,8 +250,11 @@ def main():
                         '-k'
                     ]
                 )
+
+            # Run the port forward command
             elif command == 2:
                 local, remote = print_port_forward()
+                rprint('[#7289DA]' + '='*81)
                 sp.run(
                     [
                         'mender-cli',

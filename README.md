@@ -10,6 +10,11 @@ cd mender-richer-cli
 python3 -m pip install .
 ```
 
+## Features
+
+- **terminal** - *Instanciate a reverse shell to the device*
+- **port-forward** - *Forward a port from the device to the host*
+
 ## Usage
 
 ```bash
