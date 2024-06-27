@@ -280,7 +280,7 @@ def main():
                     [
                         'mender-cli',
                         'port-forward',
-                        devices[device-1]['id'],
+                        filtered_devices[device-1]['device_id'],
                         f'{local}:{remote}',
                         '--token-value',
                         args.token,
