@@ -3,8 +3,6 @@
 # Quentin Dufournet, 2024
 # --------------------------------------------------
 # Built-in
-import requests
-from rich import print as rprint
 import argparse
 import sys
 import subprocess as sp
@@ -12,6 +10,8 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 3rd party
+import requests
+from rich import print as rprint
 
 
 def parse_args():
@@ -242,57 +242,68 @@ def main():
     print_welcome()
 
     # Main loop to interact with the devices
-    while 1:
-        # Get the list of devices
-        devices = get_devices_list(args.server, args.token)
+    try:
+        while 1:
+            # Get the list of devices
+            devices = get_devices_list(args.server, args.token)
 
-        # Print the devices list
-        filtered_devices = print_devices_list(devices)
+            # Print the devices list
+            filtered_devices = print_devices_list(devices)
 
-        # Ask the user to choose a device
-        device = print_device_choice(filtered_devices)
+            # Ask the user to choose a device
+            device = print_device_choice(filtered_devices)
 
-        # Ask the user to choose a command
-        command = print_command()
+            # Ask the user to choose a command
+            command = print_command()
 
-        try:
-            # Run the reverse shell command
-            if command == 1:
-                rprint('[#7289DA]' + '='*81)
-                sp.run(
-                    [
-                        'mender-cli',
-                        'terminal',
-                        filtered_devices[device-1]['device_id'],
-                        '--token-value',
-                        args.token,
-                        '--server',
-                        args.server,
-                        '-k'
-                    ]
-                )
+            while 1:
+                # Run the reverse shell command
+                if command == 1:
+                    rprint('[#7289DA]' + '='*81)
+                    sp.run(
+                        [
+                            'mender-cli',
+                            'terminal',
+                            filtered_devices[device-1]['device_id'],
+                            '--token-value',
+                            args.token,
+                            '--server',
+                            args.server,
+                            '-k'
+                        ]
+                    )
+                    break
 
-            # Run the port forward command
-            elif command == 2:
-                local, remote = print_port_forward()
-                rprint('[#7289DA]' + '='*81)
-                sp.run(
-                    [
-                        'mender-cli',
-                        'port-forward',
-                        filtered_devices[device-1]['device_id'],
-                        f'{local}:{remote}',
-                        '--token-value',
-                        args.token,
-                        '--server',
-                        args.server,
-                        '-k',
-                    ]
-                )
-        except KeyboardInterrupt:
-            # So the user can go back to the device list, without quitting
-            # the program
-            pass
+                # Run the port forward command
+                elif command == 2:
+                    try:
+                        local, remote = print_port_forward()
+                    except KeyboardInterrupt:
+                        # So the user can go back to the device list, without quitting
+                        # the program
+                        break
+                    rprint('[#7289DA]' + '='*81)
+                    try:
+                        sp.run(
+                            [
+                                'mender-cli',
+                                'port-forward',
+                                filtered_devices[device-1]['device_id'],
+                                f'{local}:{remote}',
+                                '--token-value',
+                                args.token,
+                                '--server',
+                                args.server,
+                                '-k',
+                            ]
+                        )
+                    except KeyboardInterrupt:
+                        # So the user can go back to the device list, without quitting
+                        # the program
+                        break
+    except KeyboardInterrupt:
+        rprint('[bold][red]\nGoodbye![/bold][/red]')
+        sys.exit(0)
 
 
 if __name__ == '__main__':
