@@ -3,6 +3,9 @@
 # Quentin Dufournet, 2024
 # --------------------------------------------------
 # Built-in
+import requests
+from rich import print as rprint
+import datetime
 import argparse
 import sys
 import subprocess as sp
@@ -10,8 +13,6 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 3rd party
-from rich import print as rprint
-import requests
 
 
 def parse_args():
@@ -74,6 +75,10 @@ def get_devices_list(server, token):
                 'attribute': 'id',
                 'scope': 'identity',
             },
+            {
+                'attribute': 'updated_ts',
+                'scope': 'system',
+            }
         ],
     }
 
@@ -109,7 +114,6 @@ def print_devices_list(devices):
 
     rprint('[#7289DA]' + '='*81 + '\n' +
            '================================[bold][#E01E5A] Devices list [/bold][/#E01E5A]===================================')
-
     filtered_devices = []
     for device in devices:
         device_name = 'Unknown'
@@ -117,11 +121,16 @@ def print_devices_list(devices):
             if 'timestamp' in attribute:
                 device_name = attribute['value']
                 break
+        device_polling = 'Unknown'
+        for attribute in device['attributes']:
+            if 'updated_ts' in str(attribute):
+                device_polling = attribute['value']
+                break
         filtered_devices.append(
             {
                 'name': device_name,
                 'device_id': device['id'],
-                'name_size': len(device_name)
+                'polling': device_polling
             }
         )
 
@@ -135,9 +144,13 @@ def print_devices_list(devices):
         device['local_id'] = id
         device_name = device['name']
         device_id = device['device_id']
+        polling = datetime.datetime.strptime(
+            device['polling'], '%Y-%m-%dT%H:%M:%S.%fZ')
+        polling = polling + datetime.timedelta(hours=2)
+        polling = polling.strftime('%Y-%m-%d %H:%M:%S')
         rprint(
             f'[#7289DA]|  [#E01E5A][bold]{id}[/#E01E5A] - {device_name}[/bold] - [italic][#65656b]({
-                device_id})[/italic][/#65656b]'
+                device_id} - {polling})[/italic][/#65656b]'
         )
 
     return filtered_devices
