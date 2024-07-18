@@ -10,8 +10,8 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 3rd party
-import requests
 from rich import print as rprint
+import requests
 
 
 def parse_args():
@@ -100,24 +100,6 @@ def print_welcome():
            '|                [bold][#E01E5A]mender-richer-cli[/bold][/#E01E5A] - A richer CLI for mender-cli                |')
 
 
-def get_space_to_add(id, device_name, device_id):
-    """ Get the space to add to the device name
-
-    :param id: The device (local) ID
-    :param device_name: The device name
-    :param device_id: The device ID
-    :return: The number of space to add
-    """
-
-    lenght_of_string = len(str(id)) + len(device_name) + len(device_id)
-    space_to_add = 69 - lenght_of_string
-    if space_to_add < 0:
-        device_id = device_id[:-space_to_add*-1] + '...'
-        space_to_add = 1
-
-    return space_to_add
-
-
 def print_devices_list(devices):
     """ Print the list of devices
 
@@ -153,10 +135,9 @@ def print_devices_list(devices):
         device['local_id'] = id
         device_name = device['name']
         device_id = device['device_id']
-        space_to_add = get_space_to_add(id, device_name, device_id)
         rprint(
             f'[#7289DA]|  [#E01E5A][bold]{id}[/#E01E5A] - {device_name}[/bold] - [italic][#65656b]({
-                device_id})[/italic][/#65656b]' + ' ' * space_to_add + '|'
+                device_id})[/italic][/#65656b]'
         )
 
     return filtered_devices
