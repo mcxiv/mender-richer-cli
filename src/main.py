@@ -144,10 +144,19 @@ def print_devices_list(devices):
         device['local_id'] = id
         device_name = device['name']
         device_id = device['device_id']
-        polling = datetime.datetime.strptime(
-            device['polling'], '%Y-%m-%dT%H:%M:%S.%fZ')
-        polling = polling + datetime.timedelta(hours=2)
-        polling = polling.strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            polling = datetime.datetime.strptime(
+                device['polling'], '%Y-%m-%dT%H:%M:%S.%fZ')
+            polling = polling + datetime.timedelta(hours=2)
+            polling = polling.strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            polling = datetime.datetime.strptime(
+                device['polling'], '%Y-%m-%dT%H:%M:%SZ')
+            polling = polling + datetime.timedelta(hours=2)
+            polling = polling.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception as e:
+            polling = 'Unknown'
+        
         rprint(
             f'[#7289DA]|  [#E01E5A][bold]{id}[/#E01E5A] - {device_name}[/bold] - [italic][#65656b]({
                 device_id} - {polling})[/italic][/#65656b]'
