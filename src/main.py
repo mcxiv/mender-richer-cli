@@ -156,7 +156,7 @@ def print_devices_list(devices):
             polling = polling.strftime('%Y-%m-%d %H:%M:%S')
         except Exception as e:
             polling = 'Unknown'
-        
+
         rprint(
             f'[#7289DA]|  [#E01E5A][bold]{id}[/#E01E5A] - {device_name}[/bold] - [italic][#65656b]({
                 device_id} - {polling})[/italic][/#65656b]'
@@ -203,21 +203,43 @@ def print_command():
 
 def print_port_forward():
     """ Print the port forward choices, and ask the user to choose the
-    local and remote ports
+    local and remote ip:port to forward.
 
     :return: The local and remote ports"""
 
     rprint('[#7289DA]' + '='*81 + '\n' +
-           'Enter the remote port you want to forward: ')
-    remote = int(input())
-    if remote < 1 or remote > 65535:
-        rprint('[bold][red]Error[/bold]: Invalid port number')
-        sys.exit(1)
-    rprint('[#7289DA]Enter the local port you want to forward to: ')
-    local = int(input())
-    if local < 1 or local > 65535:
-        rprint('[bold][red]Error[/bold]: Invalid port number')
-        sys.exit(1)
+           'Enter the remote ip:port you want to forward: ')
+    remote = input()
+    try:
+        remote_int = int(remote)
+        if remote_int > 65535:
+            rprint('[bold][red]Error[/bold]: Invalid port number')
+            sys.exit(1)
+    except ValueError:
+        remote_address = remote.split(':')
+        if len(remote_address) == 2:
+            if int(remote_address[1]) > 65535:
+                rprint('[bold][red]Error[/bold]: Invalid port number')
+                sys.exit(1)
+            if len(remote_address[0].split('.')) != 4:
+                rprint('[bold][red]Error[/bold]: Invalid IP address')
+                sys.exit(1)
+
+    rprint('[#7289DA]Enter the local ip:port you want to forward to: ')
+    local = input()
+    try:
+        if int(remote) > 65535:
+            rprint('[bold][red]Error[/bold]: Invalid port number')
+            sys.exit(1)
+    except ValueError:
+        remote_address_port = remote.split(':')
+        if len(remote_address_port) == 2:
+            if int(remote_address_port[1]) > 65535:
+                rprint('[bold][red]Error[/bold]: Invalid port number')
+                sys.exit(1)
+            if len(remote_address_port[0].split('.')) != 4:
+                rprint('[bold][red]Error[/bold]: Invalid IP address')
+                sys.exit(1)
 
     return local, remote
 
