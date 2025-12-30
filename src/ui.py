@@ -195,7 +195,7 @@ class UI:
                             style=f"bold {Colors.PRIMARY}")
         welcome_text.append("Mender CLI, but a little bit richer\n",
                             style=f"italic {Colors.TEXT_SECONDARY}")
-        welcome_text.append("v1.0", style=f"{Colors.TEXT_TERTIARY}")
+        welcome_text.append("v2.0", style=f"{Colors.TEXT_TERTIARY}")
 
         console.print(Panel(welcome_text,
                             border_style=Colors.BORDER,
