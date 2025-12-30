@@ -12,14 +12,14 @@ python3 -m pip install .
 
 ## Features
 
-- ** Cool UI** - Very cool interface
-- ** Device Management** - View and manage all your Mender devices
-- ** Terminal Access** - Instantiate a reverse shell to any device
-- ** Port Forwarding** - Forward ports from devices to your local machine
-- ** File Upload** - Upload files to devices
-- ** File Download** - Download files from devices
-- ** Artifact Deployment** - Deploy artifacts to devices
-- ** Device inventory** - Show full device inventory
+- **Cool UI** - Very cool interface
+- **Device Management** - View and manage all your Mender devices
+- **Terminal Access** - Instantiate a reverse shell to any device
+- **Port Forwarding** - Forward ports from devices to your local machine
+- **File Upload** - Upload files to devices
+- **File Download** - Download files from devices
+- **Artifact Deployment** - Deploy artifacts to devices
+- **Device inventory** - Show full device inventory
 
 ## Usage
 
@@ -42,10 +42,18 @@ options:
 
 ## Example
 
+### Devices listing
+
 ![Devices listing](./docs/intro.png)
+
+### Commands listing
 
 ![Commands listing](./docs/commands.png)
 
+### Device Iiventory listing
+
 ![Inventory listing](./docs/inventory.png)
+
+### Artifacts listing
 
 ![Artifacts listing](./docs/artifact.png)
