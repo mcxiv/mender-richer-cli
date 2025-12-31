@@ -4,6 +4,10 @@ This is just mender-cli, but *richer*.
 
 ## Installation
 
+You need to install [mender-cli](https://github.com/mendersoftware/mender-cli) as `mender-richer-cli` is a wrapper around it. (For now!)
+
+Then, you just need to install `mender-richer-cli` : 
+
 ```bash
 git clone https://github.com/mcxiv/mender-richer-cli.git
 cd mender-richer-cli
