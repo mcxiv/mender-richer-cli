@@ -104,13 +104,13 @@ class UI:
 
         # Calculate dynamic width for Name column based on actual device names
         # Start with minimum width and expand as needed
-        name_width = min(max(len(device['name']) for device in devices) + 2, 80) if devices else 30
+        name_width = min(max(len(device['name']) for device in devices), 80) if devices else 30
         
         # Add columns with proper styling and optimized widths
-        table.add_column("ID", style=f"bold {Colors.SECONDARY}", width=6, no_wrap=True)
+        table.add_column("ID", style=f"bold {Colors.SECONDARY}", width=3, no_wrap=True)
         table.add_column("Name", style=Colors.TEXT_PRIMARY, width=name_width, no_wrap=True, overflow="fold")  # Dynamic width based on actual names
         table.add_column("Device ID", style=Colors.TEXT_SECONDARY, width=36, no_wrap=True)
-        table.add_column("Last Polling", style=f"italic {Colors.TEXT_TERTIARY}", width=20, no_wrap=True)
+        table.add_column("Last Polling", style=f"italic {Colors.TEXT_TERTIARY}", width=19, no_wrap=True)
 
         for device in devices:
             try:
@@ -120,7 +120,7 @@ class UI:
                 ) if device['polling'] else datetime.datetime.now()
                 polling = polling + datetime.timedelta(hours=2)
                 polling_str = polling.strftime('%Y-%m-%d %H:%M:%S')
-            except:
+            except Exception as _:
                 polling_str = "Unknown"
 
             # Add row - styling is applied at column level

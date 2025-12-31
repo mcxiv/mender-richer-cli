@@ -181,36 +181,9 @@ def print_devices_list(devices):
     logger.debug(f"Sorting {len(filtered_devices)} devices by name")
     filtered_devices.sort(key=lambda x: x['name'].lower())
 
-<<<<<<< HEAD
-    # Print the devices
-    id = 0
-    for device in filtered_devices:
-        id += 1
-        device['local_id'] = id
-        device_name = device['name']
-        device_id = device['device_id']
-        try:
-            polling = datetime.datetime.strptime(
-                device['polling'], '%Y-%m-%dT%H:%M:%S.%fZ')
-            polling = polling + datetime.timedelta(hours=2)
-            polling = polling.strftime('%Y-%m-%d %H:%M:%S')
-        except ValueError:
-            polling = datetime.datetime.strptime(
-                device['polling'], '%Y-%m-%dT%H:%M:%SZ')
-            polling = polling + datetime.timedelta(hours=2)
-            polling = polling.strftime('%Y-%m-%d %H:%M:%S')
-        except Exception as e:
-            polling = 'Unknown'
-
-        rprint(
-            f'[#7289DA]|  [#E01E5A][bold]{id}[/#E01E5A] - {device_name}[/bold] - [italic][#65656b]({
-                device_id} - {polling})[/italic][/#65656b]'
-        )
-=======
     # Add local IDs
     for i, device in enumerate(filtered_devices, 1):
         device['local_id'] = i
->>>>>>> b086ec4 (feat: add new features and UI rework)
 
     # Display devices in table
     UI.device_table(filtered_devices)
@@ -790,41 +763,6 @@ def print_port_forward():
     :return: The local and remote ports"""
     logger.debug("Getting port forwarding configuration from user")
 
-<<<<<<< HEAD
-    rprint('[#7289DA]' + '='*81 + '\n' +
-           'Enter the remote ip:port you want to forward: ')
-    remote = input()
-    try:
-        remote_int = int(remote)
-        if remote_int > 65535:
-            rprint('[bold][red]Error[/bold]: Invalid port number')
-            sys.exit(1)
-    except ValueError:
-        remote_address = remote.split(':')
-        if len(remote_address) == 2:
-            if int(remote_address[1]) > 65535:
-                rprint('[bold][red]Error[/bold]: Invalid port number')
-                sys.exit(1)
-            if len(remote_address[0].split('.')) != 4:
-                rprint('[bold][red]Error[/bold]: Invalid IP address')
-                sys.exit(1)
-
-    rprint('[#7289DA]Enter the local ip:port you want to forward to: ')
-    local = input()
-    try:
-        if int(remote) > 65535:
-            rprint('[bold][red]Error[/bold]: Invalid port number')
-            sys.exit(1)
-    except ValueError:
-        remote_address_port = remote.split(':')
-        if len(remote_address_port) == 2:
-            if int(remote_address_port[1]) > 65535:
-                rprint('[bold][red]Error[/bold]: Invalid port number')
-                sys.exit(1)
-            if len(remote_address_port[0].split('.')) != 4:
-                rprint('[bold][red]Error[/bold]: Invalid IP address')
-                sys.exit(1)
-=======
     def validate_port_input(input_str, input_type):
         """Validate port input which can be just a port number or ip:port"""
         if ':' in input_str:
@@ -832,7 +770,6 @@ def print_port_forward():
             parts = input_str.split(':')
             if len(parts) != 2:
                 return None, f"Invalid {input_type} format. Use 'port' or 'ip:port'"
->>>>>>> b086ec4 (feat: add new features and UI rework)
 
             ip_part, port_part = parts
 
