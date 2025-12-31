@@ -50,7 +50,7 @@ options:
 
 ![Commands listing](./docs/commands.png)
 
-### Device Iiventory listing
+### Device Inventory listing
 
 ![Inventory listing](./docs/inventory.png)
 
