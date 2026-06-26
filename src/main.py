@@ -82,7 +82,7 @@ def get_devices_list(server, token):
 
     json_data = {
         'page': 1,
-        'per_page': 999999999,
+        'per_page': 500,
         'filters': [
             {
                 'scope': 'identity',
@@ -194,33 +194,81 @@ def print_devices_list(devices):
 
 def print_device_choice(devices):
     """ Print the device choice and ask the user to choose one
+    
+    Supports filtering: type '/filter' to show only devices matching 'filter' (case-insensitive)
 
-    :return: The device number
+    :return: The device number (referring to original devices list)
     """
     logger.debug(
         f"Waiting for user to select device from {len(devices)} options")
     logger.debug(
         f"Available device IDs: {[device['local_id'] for device in devices]}")
 
+    current_devices = devices
+    
     while True:
         device_input = UI.input_prompt(
-            "Enter the device number you want to interact with")
+            "Enter the device number you want to interact with (or '/filter' to search)")
+        
+        # Check for filter syntax: /filtertext
+        if device_input.startswith('/'):
+            filter_text = device_input[1:].strip()
+            logger.debug(f"User entered filter: '{filter_text}'")
+            
+            if filter_text:
+                # Filter devices by name (case-insensitive)
+                filtered = [
+                    device for device in devices
+                    if filter_text.lower() in device['name'].lower()
+                ]
+                logger.debug(f"Found {len(filtered)} devices matching filter")
+                
+                if filtered:
+                    # Create numbered copies for display without modifying originals
+                    display_devices = []
+                    for i, device in enumerate(filtered, 1):
+                        display_devices.append({
+                            **device,
+                            'local_id': i,
+                            '_original_id': device['local_id']
+                        })
+                    
+                    current_devices = display_devices
+                    UI.device_table(display_devices)
+                    continue
+                else:
+                    UI.warning_message(f"No devices found matching '{filter_text}'")
+                    # Keep current_devices as is
+                    continue
+            else:
+                # Just '/' with no filter text - reset to all devices
+                current_devices = devices
+                UI.device_table(devices)
+                continue
+        
         try:
             device_number = int(device_input)
             logger.debug(f"User selected device number: {device_number}")
 
-            if device_number not in [device['local_id'] for device in devices]:
-                logger.debug(
-                    f"Invalid device number selected: {device_number}")
+            # Find the device in current_devices and get its original local_id
+            selected = None
+            for device in current_devices:
+                if device['local_id'] == device_number:
+                    selected = device
+                    break
+            
+            if selected is None:
+                logger.debug(f"Invalid device number selected: {device_number}")
                 UI.error_message(
-                    f"Invalid device number. Please choose from {', '.join(str(d['local_id']) for d in devices)}")
+                    f"Invalid device number. Please choose from {', '.join(str(d['local_id']) for d in current_devices)}")
                 continue
 
             logger.debug(f"Valid device selection: {device_number}")
-            return device_number
+            # Return the original device's local_id
+            return selected['_original_id'] if '_original_id' in selected else selected['local_id']
         except ValueError as e:
             logger.debug(f"Invalid input for device selection: {e}")
-            UI.error_message("Please enter a valid number")
+            UI.error_message("Please enter a valid number or use '/filter' syntax")
 
 
 def get_file_path(prompt, is_local=True, is_download=False):

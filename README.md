@@ -50,6 +50,11 @@ options:
 
 ![Devices listing](./docs/intro.png)
 
+#### Devices listing with filter
+
+Typing `/<type_anything_here>` instead of selecting a command to run will print back the devices listing, but using a filter.
+![Devices listing with filter](./docs/filter.png)
+
 ### Commands listing
 
 ![Commands listing](./docs/commands.png)
