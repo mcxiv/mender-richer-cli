@@ -92,7 +92,7 @@ def _plain_picker(title: str, rows: list[list[str]]) -> tuple[list[int], str | N
 
 
 def pick(title: str, headers: list[str], rows: list[list[str]], *,
-         device_mode: bool = False, viewer: bool = False, favorite: int = -1,
+         device_mode: bool = False, multi_select: bool = False, viewer: bool = False, favorite: int = -1,
          toggle_favorite: Callable[[int], None] | None = None) -> tuple[list[int], int, str | None, bool]:
     """Display a searchable picker, falling back to numbered input outside a terminal.
 
@@ -100,6 +100,7 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
     :param headers: Column labels.
     :param rows: Selectable rows; returned indices refer to this original list.
     :param device_mode: Whether to enable device marking and favorite shortcuts.
+    :param multi_select: Whether to enable row marking without device favorite shortcuts.
     :param viewer: Whether to show inventory viewing and clipboard shortcuts.
     :param favorite: Original row index of the favorite, or -1 when none is selected.
     :param toggle_favorite: Optional callback receiving the original index of the toggled favorite.
@@ -116,8 +117,9 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
         selected, _, multi = _plain_picker(title, rows)
         return selected, favorite, None, multi
 
-    state: dict[str, Any] = {"filter": "", "cursor": 0, "matches": list(range(len(rows))),
+    state: dict[str, Any] = {"filter": "", "cursor": 0, "horizontal": 0, "matches": list(range(len(rows))),
                              "checked": set(), "favorite": favorite, "selected": [], "copy": None}
+    markable = device_mode or multi_select
 
     def render(stdscr: Any) -> None:
         """Render picker state and process keys until selection or cancellation.
@@ -146,7 +148,7 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
             _put(stdscr, 1, 1, "─" * max(0, width - 2), width - 2, curses.A_DIM)
             _put(stdscr, 2, 2, "SEARCH  " + (query or "type to filter results"), width - 4)
             summary = f"{len(matches)} results"
-            if device_mode:
+            if markable:
                 summary += f"   ·   {len(state['checked'])} selected"
             _put(stdscr, 3, 2, summary, width - 4, curses.A_DIM)
 
@@ -179,7 +181,8 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
                 pointer = "›" if position == cursor else " "
                 checked = "●" if row_index in state["checked"] else " "
                 star = "★" if row_index == state["favorite"] else " "
-                content = "  │  ".join(_clip(row[col] if col < len(row) else "", widths[col])
+                content = "  │  ".join(_clip((row[col] if col < len(row) else "")
+                                            [state["horizontal"] if viewer and col > 0 else 0:], widths[col])
                                          for col in range(columns))
                 attr = curses.A_REVERSE if position == cursor else curses.A_NORMAL
                 _put(stdscr, y + 1 + position - start,
@@ -189,8 +192,10 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
 
             if device_mode:
                 hints = "↑/↓ move   PgUp/PgDn page   Home/End jump   type filter   Space mark   Shift+F favorite   Enter open/deploy   Esc back"
+            elif multi_select:
+                hints = "↑/↓ move   PgUp/PgDn page   type filter   Space mark   Enter select   Esc back"
             elif viewer:
-                hints = "↑/↓ move   PgUp/PgDn page   Home/End jump   type filter   Shift+C copy   Esc back"
+                hints = "↑/↓ move   ←/→ scroll text   PgUp/PgDn page   type filter   Shift+C copy   Esc back"
             else:
                 hints = "↑/↓ move   PgUp/PgDn page   Home/End jump   type filter   Enter select   Esc back"
             _put(stdscr, height - 2, 1, hints, width - 2, curses.A_DIM)
@@ -211,13 +216,18 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
                 state["cursor"] = 0
             elif key == curses.KEY_END:
                 state["cursor"] = max(0, len(matches) - 1)
+            elif key == curses.KEY_LEFT and viewer:
+                state["horizontal"] = max(0, state["horizontal"] - 8)
+            elif key == curses.KEY_RIGHT and viewer:
+                longest = max((len(row[1]) for row in rows if len(row) > 1), default=0)
+                state["horizontal"] = min(max(0, longest - 1), state["horizontal"] + 8)
             elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
                 state["filter"] = state["filter"][:-1]
                 state["cursor"] = 0
             elif key == "\x15":
                 state["filter"] = ""
                 state["cursor"] = 0
-            elif key == " " and device_mode and matches:
+            elif key == " " and markable and matches:
                 row_index = matches[cursor]
                 if row_index in state["checked"]:
                     state["checked"].remove(row_index)
@@ -246,6 +256,19 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
     except curses.error as exc:
         raise RuntimeError(f"terminal picker failed: {exc}") from exc
     return state["selected"], state["favorite"], state["copy"], state.get("multi", False)
+
+
+def show_text(title: str, text: str) -> None:
+    """Show searchable text lines in the TUI, or print them when output is redirected.
+
+    :param title: Viewer heading.
+    :param text: Plain text to display; individual lines can be copied using Shift+C.
+    """
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print(text)
+        return
+    rows = [[str(number), line.expandtabs(4)] for number, line in enumerate(text.splitlines(), 1)]
+    pick(title, ["Line", "Text"], rows or [["1", "(empty)"]], viewer=True)
 
 
 def _clip(value: str, width: int) -> str:

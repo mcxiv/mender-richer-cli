@@ -1,0 +1,119 @@
+name: Tests and packages
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            setup.py
+            requirements.txt
+      - name: Install package and test tools
+        run: python -m pip install ".[test]"
+      - name: Run tests and enforce 95% coverage
+        run: python -m pytest --cov --cov-report=term-missing --cov-report=xml --junitxml=test-results.xml
+      - name: Check installed CLI outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          mrc --help
+          mrc --version
+          mrc --server https://example.com --token-value test-token groups --help
+      - name: Exercise native Linux TUI
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
+        env:
+          TERM: xterm-256color
+        run: script -q -e -c 'python tests/tui_smoke.py' tui-smoke.log
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            coverage.xml
+            test-results.xml
+            tui-smoke.log
+          retention-days: 14
+
+  build:
+    name: Build and validate distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+      - name: Install build tools
+        run: python -m pip install build twine
+      - name: Build source archive and wheel
+        run: python -m build
+      - name: Check metadata and release version
+        run: |
+          python -m twine check --strict dist/*
+          python tests/check_distribution.py dist
+      - name: Install and check both distributions in a clean environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/package-check"
+          "$RUNNER_TEMP/package-check/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          ./package-check/bin/mrc --help
+          ./package-check/bin/mrc --version
+          ./package-check/bin/python -m pip install --no-deps --force-reinstall "$GITHUB_WORKSPACE"/dist/*.tar.gz
+          ./package-check/bin/mrc --server https://example.com --token-value test-token deployments logs --help
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Attach checked packages to the published release
+    if: github.event_name == 'release'
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-distributions
+          path: dist
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/*

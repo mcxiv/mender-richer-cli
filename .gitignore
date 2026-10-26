@@ -49,6 +49,8 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+test-results.xml
+tui-smoke.log
 cover/
 
 # Translations

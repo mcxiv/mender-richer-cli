@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 import tarfile
@@ -18,11 +19,13 @@ from config import Config
 
 INVENTORY_SEARCH = "/api/management/v2/inventory/filters/search"
 INVENTORY_DEVICE = "/api/management/v1/inventory/devices"
+GROUPS = "/api/management/v1/inventory/groups"
 DEVICES = "/api/management/v2/devauth/devices"
 DEVICE_CONNECT = "/api/management/v1/deviceconnect/devices"
 ARTIFACTS = "/api/management/v1/deployments/artifacts"
 ARTIFACT_LIST = "/api/management/v1/deployments/artifacts/list"
 DEPLOYMENTS = "/api/management/v1/deployments/deployments"
+DEPLOYMENT_LIST = "/api/management/v2/deployments/deployments"
 LOGIN = "/api/management/v1/useradm/auth/login"
 
 
@@ -180,7 +183,7 @@ class MenderAPI:
 
     def list_page(self, path: str, page: int, per_page: int,
                   body: dict[str, Any] | None = None,
-                  params: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], int | None]:
+                  params: dict[str, Any] | None = None) -> tuple[list[Any], int | None]:
         """Fetch one page using GET or an inventory search POST.
 
         :param path: Management endpoint to query.
@@ -203,19 +206,22 @@ class MenderAPI:
             total = None
         return data or [], total
 
-    def all_pages(self, path: str, body: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Collect records in batches of 100 until pagination is exhausted.
+    def all_pages(self, path: str, body: dict[str, Any] | None = None, *,
+                  params: dict[str, Any] | None = None, per_page: int = 100) -> list[Any]:
+        """Collect records until pagination is exhausted.
 
         :param path: Management endpoint to query.
         :param body: Optional search body for a POST endpoint.
+        :param params: Additional GET query filters.
+        :param per_page: Requested page size; use 20 for device deployment history.
         :returns: All records in server pagination order.
         """
-        result: list[dict[str, Any]] = []
+        result: list[Any] = []
         page = 1
         while True:
-            rows, total = self.list_page(path, page, 100, body)
+            rows, total = self.list_page(path, page, per_page, body, params)
             result.extend(rows)
-            if not rows or (total is not None and page * 100 >= total) or (total is None and len(rows) < 100):
+            if not rows or (total is not None and page * per_page >= total) or (total is None and len(rows) < per_page):
                 return result
             page += 1
 
@@ -247,6 +253,157 @@ class MenderAPI:
         :returns: The device inventory record.
         """
         data, _ = self.json("GET", f"{INVENTORY_DEVICE}/{quote(device_id, safe='')}")
+        return data
+
+    def tags(self, device_id: str) -> list[dict[str, Any]]:
+        """Read server-managed tags without mixing in device-reported inventory.
+
+        :param device_id: Device whose tags should be returned.
+        :returns: Tag descriptors containing names, values, and optional descriptions.
+        """
+        tags, _ = self._tag_snapshot(device_id)
+        return tags
+
+    def _tag_snapshot(self, device_id: str) -> tuple[list[dict[str, Any]], str | None]:
+        """Read tags and the version marker required for a conditional replacement.
+
+        :param device_id: Device whose inventory should be read.
+        :returns: Tag descriptors and the inventory response's ETag, when provided.
+        """
+        data, response = self.json("GET", f"{INVENTORY_DEVICE}/{quote(device_id, safe='')}")
+        try:
+            tags = [{key: attr[key] for key in ("name", "value", "description") if key in attr}
+                    for attr in data.get("attributes", []) if attr.get("scope") == "tags"]
+            return tags, response.headers.get("ETag")
+        finally:
+            response.close()
+
+    def set_tags(self, device_id: str, values: dict[str, str]) -> None:
+        """Upsert the supplied tags while preserving all unrelated tags.
+
+        :param device_id: Device to update.
+        :param values: Tag names and string values to add or replace.
+        :raises ValueError: No tags or an empty tag name were supplied.
+        """
+        if not values or any(not name.strip() for name in values):
+            raise ValueError("provide at least one tag with a nonempty name")
+        response = self.request("PATCH", f"{INVENTORY_DEVICE}/{quote(device_id, safe='')}/tags",
+                                json=[{"name": name, "value": value} for name, value in values.items()])
+        response.close()
+
+    def rename_device(self, device_id: str, name: str) -> None:
+        """Set the device's friendly name using the server-managed name tag.
+
+        :param device_id: Device to rename.
+        :param name: Nonempty friendly name.
+        :raises ValueError: The name is empty or contains only whitespace.
+        """
+        if not name.strip():
+            raise ValueError("device name must not be empty")
+        self.set_tags(device_id, {"name": name.strip()})
+
+    def remove_tag(self, device_id: str, name: str) -> None:
+        """Remove one tag using an ETag to protect concurrent edits.
+
+        :param device_id: Device to update.
+        :param name: Existing tag name to remove.
+        :raises ValueError: The tag does not exist.
+        :raises RuntimeError: The server omits its ETag or the tags change during the operation.
+        """
+        tags, etag = self._tag_snapshot(device_id)
+        remaining = [tag for tag in tags if tag["name"] != name]
+        if len(remaining) == len(tags):
+            raise ValueError(f"tag {name!r} does not exist on device {device_id}")
+        if not etag:
+            raise RuntimeError("server did not provide a tag ETag; refusing to overwrite concurrent changes")
+        response = self.request("PUT", f"{INVENTORY_DEVICE}/{quote(device_id, safe='')}/tags",
+                                expected=(200, 412), headers={"If-Match": etag}, json=remaining)
+        try:
+            if response.status_code == 412:
+                raise RuntimeError("device tags changed during the edit; refresh and try again")
+        finally:
+            response.close()
+
+    @staticmethod
+    def _group_path(name: str) -> str:
+        """Validate a static group name and construct its inventory endpoint.
+
+        :param name: Group name containing letters, digits, periods, underscores, or hyphens.
+        :returns: The group's inventory endpoint.
+        :raises ValueError: The name is empty, longer than 256 characters, or contains invalid characters.
+        """
+        if len(name) > 256 or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            raise ValueError("group names must contain 1–256 letters, digits, periods, underscores, or hyphens")
+        return f"{GROUPS}/{quote(name, safe='')}"
+
+    def groups(self) -> list[str]:
+        """List static groups; empty groups do not exist on the server.
+
+        :returns: Group names sorted without regard to letter case.
+        """
+        data, response = self.json("GET", GROUPS)
+        try:
+            return sorted(data or [], key=str.casefold)
+        finally:
+            response.close()
+
+    def group_devices(self, name: str) -> list[str]:
+        """Fetch every page of device IDs in a static group.
+
+        :param name: Static group name.
+        :returns: Device identifiers in server pagination order.
+        """
+        return self.all_pages(self._group_path(name) + "/devices")
+
+    def device_group(self, device_id: str) -> str | None:
+        """Read the static group currently assigned to a device.
+
+        :param device_id: Device identifier.
+        :returns: The group name, or None if the device has no group.
+        """
+        data, response = self.json("GET", f"{INVENTORY_DEVICE}/{quote(device_id, safe='')}/group")
+        try:
+            return data.get("group")
+        finally:
+            response.close()
+
+    def assign_group(self, device_id: str, name: str) -> None:
+        """Move a device into a static group, creating the group if necessary.
+
+        :param device_id: Accepted device identifier.
+        :param name: Destination group; a device can belong to only one static group.
+        """
+        self._group_path(name)
+        response = self.request("PUT", f"{INVENTORY_DEVICE}/{quote(device_id, safe='')}/group",
+                                expected=(204,), json={"group": name})
+        response.close()
+
+    def add_group_devices(self, name: str, device_ids: list[str]) -> dict[str, int]:
+        """Move devices into a static group using the bulk membership endpoint.
+
+        :param name: Destination static group.
+        :param device_ids: Accepted device identifiers to move.
+        :returns: Server-reported matched and updated device counts.
+        :raises ValueError: No devices were supplied.
+        """
+        if not device_ids:
+            raise ValueError("at least one device is required")
+        data, response = self.json("PATCH", self._group_path(name) + "/devices", body=device_ids)
+        response.close()
+        return data
+
+    def remove_group_devices(self, name: str, device_ids: list[str]) -> dict[str, int]:
+        """Remove devices from a static group without deleting the devices.
+
+        :param name: Static group to remove devices from.
+        :param device_ids: Device identifiers to remove.
+        :returns: The server-reported updated device count.
+        :raises ValueError: No devices were supplied.
+        """
+        if not device_ids:
+            raise ValueError("at least one device is required")
+        data, response = self.json("DELETE", self._group_path(name) + "/devices", body=device_ids)
+        response.close()
         return data
 
     def connected(self, device_id: str) -> bool:
@@ -349,15 +506,18 @@ class MenderAPI:
         :param page: One-based page number.
         :param per_page: Maximum records requested per page.
         :param status: Optional deployment status filter.
-        :param search: Optional search text for deployment names and descriptions.
+        :param search: Optional deployment-name filter supported by the v2 list endpoint.
         :returns: The deployment records and total count, or ``None`` if no valid count is provided.
         """
         params: dict[str, Any] = {"page": page, "per_page": per_page}
         if status:
             params["status"] = status
+        # Keep the existing scheduled-list option working on servers whose v2
+        # endpoint only accepts pending/inprogress/finished status filters.
+        path = DEPLOYMENTS if status == "scheduled" else DEPLOYMENT_LIST
         if search:
-            params["search"] = search
-        data, response = self.json("GET", DEPLOYMENTS, params=params)
+            params["search" if status == "scheduled" else "name"] = search
+        data, response = self.json("GET", path, params=params)
         try:
             total = int(response.headers["X-Total-Count"])
         except (KeyError, ValueError):
@@ -374,6 +534,41 @@ class MenderAPI:
         deployment, _ = self.json("GET", path)
         stats, _ = self.json("GET", path + "/statistics")
         return deployment, stats
+
+    def deployment_devices(self, deployment_id: str, status: str | None = None) -> list[dict[str, Any]]:
+        """Read per-device deployment results, optionally filtered by status.
+
+        :param deployment_id: Deployment identifier.
+        :param status: Optional device result status, such as failure or success.
+        :returns: Device results assigned so far; devices that have not checked in may be absent.
+        """
+        path = f"{DEPLOYMENTS}/{quote(deployment_id, safe='')}/devices/list"
+        return self.all_pages(path, params={"status": status} if status else None)
+
+    def deployment_log(self, deployment_id: str, device_id: str) -> str:
+        """Fetch the plain-text log uploaded by a device for one deployment.
+
+        :param deployment_id: Deployment identifier.
+        :param device_id: Device whose log should be read.
+        :returns: The uploaded log, without JSON decoding or added formatting.
+        :raises RuntimeError: No log is available for the selected device and deployment.
+        """
+        path = f"{DEPLOYMENTS}/{quote(deployment_id, safe='')}/devices/{quote(device_id, safe='')}/log"
+        response = self.request("GET", path, expected=(200, 404))
+        try:
+            if response.status_code == 404:
+                raise RuntimeError("no deployment log is available for this device; it may not have uploaded one yet")
+            return response.text
+        finally:
+            response.close()
+
+    def device_deployments(self, device_id: str) -> list[dict[str, Any]]:
+        """Fetch the deployment history for a device using the endpoint's 20-row page limit.
+
+        :param device_id: Device identifier.
+        :returns: Deployment history entries containing deployment metadata and device results.
+        """
+        return self.all_pages(f"{DEPLOYMENTS}/devices/{quote(device_id, safe='')}", per_page=20)
 
     def cancel_deployment(self, deployment_id: str) -> None:
         """Request that a deployment be aborted.

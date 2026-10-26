@@ -55,7 +55,8 @@ In PowerShell, environment variables use the `$env:` prefix:
 mrc "$env:SERVER_MENDER_CLOUD" "$env:TOKEN_MENDER_CLOUD"
 ```
 
-This opens the interactive device picker. You can also run commands directly:
+This opens the TUI main menu. Choose **Devices**, **Groups**, or **Deployments**.
+You can also run commands directly:
 
 ```bash
 mrc "$SERVER_MENDER_CLOUD" "$TOKEN_MENDER_CLOUD" devices list --raw
@@ -80,9 +81,10 @@ Use `-v` / `--verbose` to log request methods and URLs. For development servers,
 ## Features
 
 - **Terminal UI** — Searchable lists with keyboard navigation.
-- **Device management** — Browse devices, inspect inventory, and save a favorite.
+- **Device management** — Browse devices, inspect inventory, rename devices, edit tags, and save a favorite.
+- **Static groups** — Browse groups, move devices between them, and deploy to their current members.
 - **Artifact management** — List, sort, upload, download, and delete artifacts.
-- **Deployments** — Deploy to one or several devices, filter deployments, watch progress, and cancel them.
+- **Deployments** — Deploy to one or several devices, watch progress, inspect individual results and logs, browse a device's history, and cancel deployments.
 - **Terminal access** — Open a remote terminal on a connected device. Press Ctrl+] to exit.
 - **Port forwarding** — Forward TCP and UDP ports from devices to your machine.
 - **File transfer** — Upload files to devices and download them to your machine.
@@ -101,6 +103,8 @@ Remote terminal and forwarding require a connected device and server-side suppor
 | Space | Mark devices for a group deployment |
 | Shift+F | Toggle the favorite device |
 | Esc | Go back |
+| Left / Right in a text viewer | Scroll long values or log lines horizontally |
+| Shift+C in a text viewer | Copy the selected value or log line |
 
 ## Authentication and configuration
 
@@ -139,7 +143,7 @@ permissions from their parent directory in your user profile.
 With authentication configured as above:
 
 ```bash
-mrc                                      # interactive device picker
+mrc                                      # TUI main menu
 mrc devices list --raw
 mrc devices inventory DEVICE_ID
 mrc artifacts list --sort type
@@ -154,6 +158,63 @@ mrc cp DEVICE_ID:/var/log/my-app.log . --yes
 mrc completion zsh
 ```
 
+### Names and tags
+
+Names are stored in Mender's `name` tag. Renaming or setting tags preserves
+unrelated tags; removing a tag checks the server's ETag to protect concurrent edits.
+
+```bash
+mrc devices rename DEVICE_ID "Paris test bench"
+mrc devices tags list DEVICE_ID
+mrc devices tags set DEVICE_ID site=Paris environment=testing
+mrc devices tags remove DEVICE_ID environment --yes
+```
+
+In the TUI, select a device and choose **Rename device**, **Edit tags**, or
+**Change group**. The device list refreshes after returning from its action menu.
+
+### Static groups
+
+A device belongs to at most one static group. Adding it to another group moves
+it out of its previous group. A group is created when devices are assigned to it
+and disappears when its last device is removed.
+
+```bash
+mrc groups list
+mrc groups devices staging --raw
+mrc groups add staging DEVICE_ID_1 DEVICE_ID_2 --yes
+mrc groups remove staging DEVICE_ID_1 --yes
+mrc groups deploy staging release-2.4 --name "Staging update" --yes
+```
+
+Group deployment takes a snapshot of the group's current device IDs. Later
+membership changes do not change its targets. These operations use static groups
+and the standard deployment API available on Basic; no dynamic deployment or
+Enterprise saved-filter API is used.
+
+The TUI's **Groups** view supports creating a group, browsing its devices,
+adding or removing members, and selecting an artifact to deploy.
+
+### Deployment results and logs
+
+```bash
+mrc deployments devices DEPLOYMENT_ID
+mrc deployments devices DEPLOYMENT_ID --status failure --raw
+mrc deployments logs DEPLOYMENT_ID DEVICE_ID
+mrc deployments logs DEPLOYMENT_ID DEVICE_ID --output deployment.log
+mrc devices deployments DEVICE_ID --raw
+```
+
+In the TUI, open **Deployments**, select a deployment, then choose **Device
+results**. Select a device with an uploaded log to read it. A device's action
+menu also provides **Deployment history**. Log viewers support searching,
+horizontal scrolling, and copying individual lines.
+
+Device results appear as devices check for updates, so devices that have not
+checked in may be absent. Logs are available only after a device uploads them.
+Deployment listing uses Mender's v2 name filter; `--search` filters deployment
+names rather than descriptions.
+
 Run `mrc COMMAND --help` for command options.
 
 Windows drive-letter and UNC paths work as local file operands. Remote paths
@@ -167,18 +228,44 @@ mrc cp DEVICE_ID:/var/log/my-app.log 'C:\Users\you\Downloads' --yes
 
 ## Development
 
-Run the regression suite on either platform:
+Install the test dependencies and run pytest on either platform:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pip install -e ".[test]"
+python -m pytest
+python -m pytest --cov --cov-report=term-missing
 ```
 
-To check native Windows console input and the interactive picker, run this in
-a Windows console. It queues test key events and exits automatically:
+The suite covers CLI and TUI workflows, HTTP requests, pagination, transfers,
+configuration and token storage, protocol messages, remote shells, TCP/UDP
+forwarding, and Linux/Windows console handling. Tests use temporary files and
+fixture credentials. HTTP integration tests start a local server on loopback;
+they do not contact a live Mender tenant.
+
+Coverage runs enforce a 95% minimum across application statements and branches.
+To run just the tests that do not open local sockets, use
+`python -m pytest -m "not integration"`.
+
+To exercise the actual TUI on Linux or Windows, run this in a terminal. It uses
+fixture data, queues test key events, and exits automatically without contacting
+a Mender server:
 
 ```powershell
-python tests/windows_console_smoke.py
+python tests/tui_smoke.py
 ```
+
+## GitHub Actions
+
+The workflow in `.github/workflows/ci.yml` runs on pushes, pull requests,
+manual dispatch, and published releases. It tests Python 3.10–3.14 on Linux and
+Windows, saves coverage and JUnit reports, and runs the native Linux TUI smoke
+test. It also builds the wheel and source archive, checks their metadata and
+contents, and tests installation from both formats in a clean environment.
+
+When you publish a GitHub release, the workflow attaches the checked wheel and
+source archive after all tests and packaging checks pass. The release tag must
+match both the package and CLI version, for example `v0.1.1`. It uses GitHub's
+built-in token and does not publish to PyPI.
 
 ## Screenshots
 

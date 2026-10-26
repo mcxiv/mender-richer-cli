@@ -90,9 +90,9 @@ def terminal(api: MenderAPI, device_id: str) -> None:
     api.require_connected(device_id)
     print(f"\n{api.display_name(device_id)} ({device_id}) — Remote terminal · Ctrl+] to leave")
     ws = connect(api, device_id)
-    width, height = _terminal_size()
     session = ""
     try:
+        width, height = _terminal_size()
         _send(ws, message(PROTO_SHELL, "new", properties={"terminal_width": width,
                                                             "terminal_height": height}))
         ws.settimeout(0.25)
@@ -243,13 +243,13 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
         raise ValueError("at least one mapping is required")
     api.require_connected(device_id)
     ws = connect(api, device_id)
-    ws.settimeout(0.15)
-    body = msgpack.packb({"versions": [1]}, use_bin_type=True)
-    _send(ws, message(PROTO_CONTROL, "open", body=body))
-    deadline = time.monotonic() + 30
     protocol = 0
     session = ""
     try:
+        ws.settimeout(0.15)
+        body = msgpack.packb({"versions": [1]}, use_bin_type=True)
+        _send(ws, message(PROTO_CONTROL, "open", body=body))
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             item = _recv(ws)
             if item is None:
@@ -268,7 +268,7 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
             break
         if not protocol:
             raise TimeoutError("port-forward negotiation timed out")
-    except Exception:
+    except BaseException:
         ws.close()
         raise
 
@@ -279,16 +279,16 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
         for mapping in mappings:
             if mapping.protocol == "tcp":
                 listener = socket.socket(socket.AF_INET6 if ":" in bind else socket.AF_INET, socket.SOCK_STREAM)
+                listeners.append(listener)
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 listener.bind((bind, mapping.local_port))
                 listener.listen()
                 listener.setblocking(False)
-                listeners.append(listener)
             else:
                 listener = socket.socket(socket.AF_INET6 if ":" in bind else socket.AF_INET, socket.SOCK_DGRAM)
+                listeners.append(listener)
                 listener.bind((bind, mapping.local_port))
                 listener.setblocking(False)
-                listeners.append(listener)
                 connection_id = str(uuid.uuid4())
                 route = Route(mapping, connection_id, listener, udp=True)
                 routes[connection_id] = route
