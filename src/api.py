@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import tarfile
 import tempfile
@@ -407,7 +408,7 @@ class MenderAPI:
                               int(artifact.get("size", 0)), progress, authenticated=False)
 
     def upload_file(self, device_id: str, local: Path, remote: str) -> None:
-        """Upload a file to a connected device, including its local mode.
+        """Upload a file, preserving POSIX modes or using 0644 for Windows source files.
 
         :param device_id: Target device identifier.
         :param local: Local file to upload.
@@ -415,7 +416,7 @@ class MenderAPI:
         :raises RuntimeError: The device is disconnected or the server rejects the transfer.
         """
         self.require_connected(device_id)
-        mode = f"{local.stat().st_mode:o}"
+        mode = f"{(stat.S_IFREG | 0o644) if os.name == 'nt' else local.stat().st_mode:o}"
         self._multipart(f"{DEVICE_CONNECT}/{quote(device_id, safe='')}/upload", "PUT", local,
                         "file", {"path": remote, "mode": mode}, True)
 

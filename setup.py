@@ -11,7 +11,7 @@ setuptools.setup(
     name="mender-richer-cli",
     version="0.1.1",
     package_dir={"": "src"},
-    py_modules=["main", "api", "config", "display", "protocol", "remote"],
+    py_modules=["main", "api", "config", "display", "protocol", "remote", "terminal_io"],
     python_requires=">=3.10",
     install_requires=install_requires,
     entry_points={
