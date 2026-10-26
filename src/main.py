@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import sys
 import time
@@ -541,7 +542,11 @@ def _parse_remote(value: str) -> tuple[str, str] | None:
     :param value: Candidate operand in ``DEVICE_ID:PATH`` form.
     :returns: The nonempty device ID and path, or ``None`` for a local or incomplete operand.
     """
+    if ntpath.splitdrive(value)[0]:
+        return None
     device, separator, path = value.partition(":")
+    if "/" in device or "\\" in device:
+        return None
     return (device, path) if separator and device and path else None
 
 

@@ -8,7 +8,8 @@ Originally a wrapper around `mender-cli`, it now talks directly to Mender's HTTP
 
 ## Installation
 
-Requires Python 3.10 or newer.
+Requires Python 3.10 or newer. Supports Linux and Windows 10/11. On Windows,
+installation includes `windows-curses` for the interactive picker.
 
 With [pipx](https://pipx.pypa.io/):
 
@@ -26,12 +27,32 @@ source .venv/bin/activate
 python -m pip install .
 ```
 
+On Windows, use PowerShell:
+
+```powershell
+git clone https://github.com/mcxiv/mender-richer-cli.git
+cd mender-richer-cli
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\mrc.exe --help
+```
+
+You can also use `pipx install .` on Windows to make `mrc` available outside the
+virtual environment. Run the interactive UI and remote shell in a console such
+as Windows Terminal or PowerShell.
+
 ## Usage
 
 Pass your Mender server URL and API token:
 
 ```bash
 mrc "$SERVER_MENDER_CLOUD" "$TOKEN_MENDER_CLOUD"
+```
+
+In PowerShell, environment variables use the `$env:` prefix:
+
+```powershell
+mrc "$env:SERVER_MENDER_CLOUD" "$env:TOKEN_MENDER_CLOUD"
 ```
 
 This opens the interactive device picker. You can also run commands directly:
@@ -106,6 +127,13 @@ Configuration files are checked in order: `./.mender-richer-clirc`, `./.mender-c
 
 Saved tokens are stored in `$XDG_CACHE_HOME/mender/authtoken`, falling back to `$HOME/.cache/mender/authtoken`. Favorites are stored in `$XDG_CONFIG_HOME/mender-richer-cli/favorites.json`, falling back to `$HOME/.config/mender-richer-cli/favorites.json`.
 
+On Windows, the defaults are `%LOCALAPPDATA%\mender\authtoken` and
+`%APPDATA%\mender-richer-cli\favorites.json`. XDG variables still take precedence
+when set. System configuration is read from
+`%PROGRAMDATA%\mender-richer-cli\.mender-richer-clirc` instead of `/etc`.
+Linux token and favorites files use mode `0600`; Windows files inherit access
+permissions from their parent directory in your user profile.
+
 ## Examples
 
 With authentication configured as above:
@@ -127,6 +155,30 @@ mrc completion zsh
 ```
 
 Run `mrc COMMAND --help` for command options.
+
+Windows drive-letter and UNC paths work as local file operands. Remote paths
+still use `DEVICE_ID:PATH`. Files uploaded from Windows use mode `0644` on the
+device; Linux uploads retain their local permissions.
+
+```powershell
+mrc cp 'C:\Users\you\config.toml' DEVICE_ID:/etc/my-app/config.toml --yes
+mrc cp DEVICE_ID:/var/log/my-app.log 'C:\Users\you\Downloads' --yes
+```
+
+## Development
+
+Run the regression suite on either platform:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+To check native Windows console input and the interactive picker, run this in
+a Windows console. It queues test key events and exits automatically:
+
+```powershell
+python tests/windows_console_smoke.py
+```
 
 ## Screenshots
 

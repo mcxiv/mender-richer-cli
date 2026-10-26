@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import curses
 import json
-import os
-import shutil
 import sys
 from typing import Any, Callable
+
+try:
+    import curses
+except ImportError:
+    curses = None
 
 from rich.console import Console
 from rich.table import Table
@@ -103,10 +105,13 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
     :param toggle_favorite: Optional callback receiving the original index of the toggled favorite.
     :returns: Selected row indices, the favorite index, copied text or ``None``, and whether
         selection came from marked rows.
-    :raises RuntimeError: The curses interface cannot be initialized or rendered.
+    :raises RuntimeError: Curses is unavailable, or the interface cannot be initialized or rendered.
     """
     if not rows:
         return [], favorite, None, False
+    if curses is None:
+        raise RuntimeError("the terminal UI requires curses; on Windows, install it with "
+                           "`python -m pip install windows-curses`")
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         selected, _, multi = _plain_picker(title, rows)
         return selected, favorite, None, multi
@@ -119,7 +124,10 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
 
         :param stdscr: Curses screen supplied by ``curses.wrapper``.
         """
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         stdscr.keypad(True)
         try:
             curses.use_default_colors()
@@ -253,7 +261,7 @@ def _clip(value: str, width: int) -> str:
     return value[:max(0, width - 1)] + "…"
 
 
-def _put(screen: Any, y: int, x: int, value: str, width: int, attr: int = curses.A_NORMAL) -> None:
+def _put(screen: Any, y: int, x: int, value: str, width: int, attr: int = 0) -> None:
     """Write within the screen bounds, ignoring curses drawing errors.
 
     :param screen: Curses window receiving the text.

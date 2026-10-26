@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import select
-import signal
+import shutil
 import socket
 import ssl
-import struct
 import sys
-import termios
 import time
-import tty
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +17,7 @@ import msgpack
 import websocket
 
 from api import DEVICE_CONNECT, MenderAPI
+from terminal_io import terminal_io
 from protocol import (PROTO_CONTROL, PROTO_PORT_FORWARD, PROTO_PORT_FORWARD_V2,
                        PROTO_SHELL, body_value, message, pack_message, unpack_message)
 
@@ -76,11 +73,7 @@ def _terminal_size() -> tuple[int, int]:
 
     :returns: The terminal width and height in characters.
     """
-    try:
-        size = struct.unpack("HHHH", __import__("fcntl").ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
-        return size[1], size[0]
-    except (OSError, AttributeError):
-        return 80, 40
+    return tuple(shutil.get_terminal_size(fallback=(80, 40)))
 
 
 def terminal(api: MenderAPI, device_id: str) -> None:
@@ -97,7 +90,6 @@ def terminal(api: MenderAPI, device_id: str) -> None:
     api.require_connected(device_id)
     print(f"\n{api.display_name(device_id)} ({device_id}) — Remote terminal · Ctrl+] to leave")
     ws = connect(api, device_id)
-    old_settings = termios.tcgetattr(sys.stdin.fileno())
     width, height = _terminal_size()
     session = ""
     try:
@@ -122,48 +114,46 @@ def terminal(api: MenderAPI, device_id: str) -> None:
         if not session:
             raise TimeoutError("timed out creating remote terminal")
 
-        tty.setraw(sys.stdin.fileno())
-        os.write(sys.stdout.fileno(), b"\r\nConnected. Ctrl+] returns to the device list.\r\n")
-        next_resize = time.monotonic() + 0.4
-        while True:
-            ready, _, _ = select.select([sys.stdin, ws.sock], [], [], 0.2)
-            if sys.stdin in ready:
-                data = os.read(sys.stdin.fileno(), 4096)
-                if not data or b"\x1d" in data:
-                    _send(ws, message(PROTO_SHELL, "stop", session))
-                    break
-                _send(ws, message(PROTO_SHELL, "shell", session, data))
-            if ws.sock in ready:
-                item = _recv(ws)
-                if item is None:
-                    continue
-                hdr = item["hdr"]
-                kind = hdr.get("typ")
-                if hdr.get("proto") == PROTO_CONTROL:
-                    if kind == "ping":
-                        _send(ws, message(PROTO_CONTROL, "pong", session))
-                    elif kind == "close":
+        with terminal_io() as console:
+            console.write(b"\r\nConnected. Ctrl+] returns to the device list.\r\n")
+            next_resize = time.monotonic() + 0.4
+            while True:
+                data, readable = console.poll(ws.sock)
+                if data is not None:
+                    if not data or b"\x1d" in data:
+                        _send(ws, message(PROTO_SHELL, "stop", session))
                         break
-                    elif kind == "error":
-                        raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
-                elif hdr.get("proto") == PROTO_SHELL:
-                    if kind == "shell":
-                        os.write(sys.stdout.fileno(), item.get("body", b""))
-                    elif kind == "ping":
-                        _send(ws, message(PROTO_SHELL, "pong", session))
-                    elif kind == "stop":
-                        break
-                    elif kind == "error":
-                        raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
-            if time.monotonic() >= next_resize:
-                new_width, new_height = _terminal_size()
-                if (new_width, new_height) != (width, height):
-                    width, height = new_width, new_height
-                    _send(ws, message(PROTO_SHELL, "resize", session, properties={
-                        "terminal_width": width, "terminal_height": height}))
-                next_resize = time.monotonic() + 0.4
+                    _send(ws, message(PROTO_SHELL, "shell", session, data))
+                if readable:
+                    item = _recv(ws)
+                    if item is None:
+                        continue
+                    hdr = item["hdr"]
+                    kind = hdr.get("typ")
+                    if hdr.get("proto") == PROTO_CONTROL:
+                        if kind == "ping":
+                            _send(ws, message(PROTO_CONTROL, "pong", session))
+                        elif kind == "close":
+                            break
+                        elif kind == "error":
+                            raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
+                    elif hdr.get("proto") == PROTO_SHELL:
+                        if kind == "shell":
+                            console.write(item.get("body", b""))
+                        elif kind == "ping":
+                            _send(ws, message(PROTO_SHELL, "pong", session))
+                        elif kind == "stop":
+                            break
+                        elif kind == "error":
+                            raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
+                if time.monotonic() >= next_resize:
+                    new_width, new_height = _terminal_size()
+                    if (new_width, new_height) != (width, height):
+                        width, height = new_width, new_height
+                        _send(ws, message(PROTO_SHELL, "resize", session, properties={
+                            "terminal_width": width, "terminal_height": height}))
+                    next_resize = time.monotonic() + 0.4
     finally:
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
         ws.close()
 
 

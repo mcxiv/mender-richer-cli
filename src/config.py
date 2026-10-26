@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,26 +43,36 @@ def config_candidates() -> list[Path]:
     :returns: The paths to check; the first existing file takes precedence.
     """
     home = Path.home()
-    return [Path(".mender-richer-clirc"), Path(".mender-clirc"), home / ".mender-richer-clirc",
-            home / ".mender-clirc", Path("/etc/mender-richer-cli/.mender-richer-clirc"),
-            Path("/etc/mender/.mender-clirc")]
+    paths = [Path(".mender-richer-clirc"), Path(".mender-clirc"), home / ".mender-richer-clirc",
+             home / ".mender-clirc"]
+    if sys.platform == "win32":
+        if os.environ.get("PROGRAMDATA"):
+            paths.append(Path(os.environ["PROGRAMDATA"]) / "mender-richer-cli" / ".mender-richer-clirc")
+    else:
+        paths.extend([Path("/etc/mender-richer-cli/.mender-richer-clirc"),
+                      Path("/etc/mender/.mender-clirc")])
+    return paths
 
 
 def default_token_path() -> Path:
-    """Locate the token file using XDG_CACHE_HOME or the home cache directory.
+    """Locate the token file using XDG_CACHE_HOME or the platform's user cache.
 
     :returns: The shared Mender authentication-token path.
     """
-    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    default = (Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+               if sys.platform == "win32" else Path.home() / ".cache")
+    cache = Path(os.environ.get("XDG_CACHE_HOME", default))
     return cache / "mender" / "authtoken"
 
 
 def favorite_path() -> Path:
-    """Locate the favorites file using XDG_CONFIG_HOME or the home config directory.
+    """Locate favorites using XDG_CONFIG_HOME or the platform's user configuration directory.
 
     :returns: The application-specific favorites JSON path.
     """
-    config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    default = (Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+               if sys.platform == "win32" else Path.home() / ".config")
+    config = Path(os.environ.get("XDG_CONFIG_HOME", default))
     return config / "mender-richer-cli" / "favorites.json"
 
 
@@ -129,7 +140,7 @@ class Config:
                    skip_verify, verbose)
 
     def save_token(self, token: bytes) -> None:
-        """Atomically save a token in a file with owner-only read/write permissions.
+        """Atomically save a token using POSIX mode 0600 or inherited Windows directory ACLs.
 
         :param token: Token bytes to store without modification.
         :raises OSError: The token directory or file cannot be created, written, or replaced.
@@ -137,8 +148,9 @@ class Config:
         self.token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, temporary = tempfile.mkstemp(prefix=".mender-richer-cli-", dir=self.token_path.parent)
         try:
-            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as output:
+                if sys.platform != "win32":
+                    os.fchmod(output.fileno(), 0o600)
                 output.write(token)
                 output.flush()
                 os.fsync(output.fileno())
@@ -192,8 +204,9 @@ class Favorites:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, temporary = tempfile.mkstemp(prefix=".favorites-", dir=self.path.parent)
         try:
-            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as output:
+                if sys.platform != "win32":
+                    os.fchmod(output.fileno(), 0o600)
                 json.dump({"servers": self.servers}, output, indent=2)
                 output.write("\n")
                 output.flush()
