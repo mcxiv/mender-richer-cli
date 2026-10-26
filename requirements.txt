@@ -1,2 +1,6 @@
-requests==2.32.3
-rich==13.7.1
+click>=8.1
+requests>=2.31
+rich>=13.7
+websocket-client>=1.7
+msgpack>=1.0
+requests-toolbelt>=1.0

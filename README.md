@@ -1,68 +1,155 @@
 # mender-richer-cli
 
-This is just mender-cli, but *richer*.
+This is just Mender from your terminal, but *richer*.
+
+Manage devices, artifacts, and deployments from an interactive terminal UI or the command line.
+
+Originally a wrapper around `mender-cli`, it now talks directly to Mender's HTTP and WebSocket APIs. You no longer need to install `mender-cli`.
 
 ## Installation
 
-You need to install [mender-cli](https://github.com/mendersoftware/mender-cli) as `mender-richer-cli` is a wrapper around it. (For now!)
+Requires Python 3.10 or newer.
 
-Then, you just need to install `mender-richer-cli` : 
+With [pipx](https://pipx.pypa.io/):
 
 ```bash
 git clone https://github.com/mcxiv/mender-richer-cli.git
 cd mender-richer-cli
-python3 -m pip install .
+pipx install .
 ```
 
-## Features
+Or, from the repository, install into a virtual environment:
 
-- **Cool UI** - Very cool interface
-- **Device Management** - View and manage all your Mender devices
-- **Terminal Access** - Instantiate a reverse shell to any device
-- **Port Forwarding** - Forward ports from devices to your local machine
-- **File Upload** - Upload files to devices
-- **File Download** - Download files from devices
-- **Artifact Deployment** - Deploy artifacts to devices
-- **Device inventory** - Show full device inventory
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+```
 
 ## Usage
 
+Pass your Mender server URL and API token:
+
 ```bash
-mrc --help
-
-usage: mrc [-h] [--insecure] [--debug] server token
-
-A richer CLI for Mender
-
-positional arguments:
-  server      Mender server URL
-  token       Mender API token
-
-options:
-  -h, --help  show this help message and exit
-  --insecure  Disable SSL certificate verification (not recommended for production)
-  --debug     Enable debug logging
+mrc "$SERVER_MENDER_CLOUD" "$TOKEN_MENDER_CLOUD"
 ```
 
-## Example
+This opens the interactive device picker. You can also run commands directly:
 
-### Devices listing
+```bash
+mrc "$SERVER_MENDER_CLOUD" "$TOKEN_MENDER_CLOUD" devices list --raw
+mrc --help
+mrc devices --help
+```
 
-![Devices listing](./docs/intro.png)
+You can also use named options:
 
-#### Devices listing with filter
+```bash
+mrc --server https://hosted.mender.io --token-value "$MENDER_API_TOKEN"
+```
 
-Typing `/<type_anything_here>` instead of selecting a command to run will print back the devices listing, but using a filter.
+Global options go before the command, or after the positional server and token:
+
+```bash
+mrc "$SERVER_MENDER_CLOUD" "$TOKEN_MENDER_CLOUD" -v devices list
+```
+
+Use `-v` / `--verbose` to log request methods and URLs. For development servers, `-k` / `--skip-verify` disables TLS certificate verification.
+
+## Features
+
+- **Terminal UI** — Searchable lists with keyboard navigation.
+- **Device management** — Browse devices, inspect inventory, and save a favorite.
+- **Artifact management** — List, sort, upload, download, and delete artifacts.
+- **Deployments** — Deploy to one or several devices, filter deployments, watch progress, and cancel them.
+- **Terminal access** — Open a remote terminal on a connected device. Press Ctrl+] to exit.
+- **Port forwarding** — Forward TCP and UDP ports from devices to your machine.
+- **File transfer** — Upload files to devices and download them to your machine.
+- **Authentication** — API tokens, login prompts, two-factor authentication, and private token storage.
+- **Scripting** — JSON output and shell completion for Bash, Zsh, Fish, PowerShell, and Elvish.
+
+Remote terminal and forwarding require a connected device and server-side support.
+
+## Keyboard controls
+
+| Key | Action |
+| --- | --- |
+| Arrows, Page Up / Page Down | Move through the list |
+| Type | Filter results |
+| Enter | Select an item |
+| Space | Mark devices for a group deployment |
+| Shift+F | Toggle the favorite device |
+| Esc | Go back |
+
+## Authentication and configuration
+
+Log in to save a token for later commands:
+
+```bash
+mrc --server https://hosted.mender.io login --username you@example.com
+mrc
+```
+
+For a different server, keep passing `--server` or set `MENDER_SERVER` so later commands use that server too.
+
+You can also set credentials through environment variables:
+
+```bash
+export MENDER_SERVER="https://hosted.mender.io"
+export MENDER_TOKEN="$MENDER_API_TOKEN"
+mrc devices list --raw
+```
+
+Tokens can come from the positional token, `--token-value`, `MENDER_TOKEN`, a token file passed with `--token`, or the saved token. The app also reads `MENDER_USERNAME` and `MENDER_PASSWORD`.
+
+Configuration files are checked in order: `./.mender-richer-clirc`, `./.mender-clirc`, `$HOME/.mender-richer-clirc`, `$HOME/.mender-clirc`, `/etc/mender-richer-cli/.mender-richer-clirc`, and `/etc/mender/.mender-clirc`.
+
+Saved tokens are stored in `$XDG_CACHE_HOME/mender/authtoken`, falling back to `$HOME/.cache/mender/authtoken`. Favorites are stored in `$XDG_CONFIG_HOME/mender-richer-cli/favorites.json`, falling back to `$HOME/.config/mender-richer-cli/favorites.json`.
+
+## Examples
+
+With authentication configured as above:
+
+```bash
+mrc                                      # interactive device picker
+mrc devices list --raw
+mrc devices inventory DEVICE_ID
+mrc artifacts list --sort type
+mrc artifacts upload update.mender --description "Release 2.4"
+mrc artifacts deploy release-2.4 DEVICE_ID_1 DEVICE_ID_2 --yes
+mrc deployments list --status inprogress --search release
+mrc deployments watch DEPLOYMENT_ID
+mrc terminal DEVICE_ID
+mrc port-forward DEVICE_ID 8080:80 udp/5353:53
+mrc cp ./config.toml DEVICE_ID:/etc/my-app/config.toml --yes
+mrc cp DEVICE_ID:/var/log/my-app.log . --yes
+mrc completion zsh
+```
+
+Run `mrc COMMAND --help` for command options.
+
+## Screenshots
+
+### Devices
+
+![Devices listing](./docs/devices.png)
+
+### Filtering
+
 ![Devices listing with filter](./docs/filter.png)
 
-### Commands listing
+### Device commands
 
 ![Commands listing](./docs/commands.png)
 
-### Device Inventory listing
+### Inventory
 
 ![Inventory listing](./docs/inventory.png)
 
-### Artifacts listing
+### Artifacts
 
 ![Artifacts listing](./docs/artifact.png)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

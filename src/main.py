@@ -1,1175 +1,690 @@
-# --------------------------------------------------
-# mender-richer-cli - A richer CLI for Mender
-# Quentin Dufournet, 2024
-# --------------------------------------------------
-# Built-in
-from src.ui import UI, Colors, Table, ROUNDED, console
-import requests
-import datetime
-import argparse
-import sys
-import subprocess as sp
-import urllib3
-import logging
+"""Command-line entry point and interactive Mender device workflows."""
+
+from __future__ import annotations
+
+import json
 import os
+import sys
+import time
+from pathlib import Path
+from typing import Any
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import click
+from rich.console import Console
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+from api import (ARTIFACTS, ARTIFACT_LIST, DEPLOYMENTS, DEVICES, INVENTORY_DEVICE,
+                  MenderAPI, artifact_kind, device_name, device_updated)
+from config import Config, Favorites
+from display import confirm, flatten_inventory, human_size, pick, print_json, table
+import remote
 
-# Local imports
+__version__ = "0.1.1"
+
+CONSOLE = Console(no_color=True, highlight=False)
 
 
-def parse_args():
-    """ Parse the CLI arguments
+class Context:
+    """Share resolved configuration and an API client across CLI commands."""
 
-    :return: The parsed arguments
+    def __init__(self, config: Config):
+        """Create the API client used by commands in this invocation.
+
+        :param config: Resolved connection and authentication settings.
+        """
+        self.config = config
+        self.api = MenderAPI(config)
+
+
+def _say(text: str) -> None:
+    """Print a status message on standard output.
+
+    :param text: Message to print.
     """
-    logger.debug("Parsing CLI arguments")
-
-    parser = argparse.ArgumentParser(
-        description='A richer CLI for Mender'
-    )
-
-    parser.add_argument(
-        'server',
-        type=str,
-        help='Mender server URL'
-    )
-
-    parser.add_argument(
-        'token',
-        type=str,
-        help='Mender API token'
-    )
-
-    parser.add_argument(
-        '--insecure',
-        action='store_true',
-        help='Disable SSL certificate verification (not recommended for production)',
-        default=False
-    )
-
-    parser.add_argument(
-        '--debug',
-        action='store_true',
-        help='Enable debug logging',
-        default=False
-    )
-
-    args = parser.parse_args()
-    logger.debug(
-        f"Parsed arguments: server={args.server}, token_length={len(args.token) if args.token else 0}, insecure={args.insecure}, debug={args.debug}")
-    return args
+    print(text)
 
 
-def get_devices_list(server, token):
-    """ Get the list of devices from the Mender server
+def _deployment_table(deployment: dict[str, Any], stats: dict[str, Any]) -> None:
+    """Print deployment metadata, aggregate progress, and device-state counts.
 
-    :param token: The Mender API token
-    :return: The list of devices
+    :param deployment: Deployment record returned by the API.
+    :param stats: Mapping of device state names to counts.
     """
-    logger.debug(f"Getting devices list from server: {server}")
-    logger.debug(f"Using token with length: {len(token) if token else 0}")
-
-    json_data = {
-        'page': 1,
-        'per_page': 500,
-        'filters': [
-            {
-                'scope': 'identity',
-                'attribute': 'status',
-                'type': '$eq',
-                'value': 'accepted',
-            },
-        ],
-        'attributes': [
-            {
-                'scope': 'identity',
-                'attribute': 'status',
-            },
-            {
-                'scope': 'inventory',
-                'attribute': 'artifact_name',
-            },
-            {
-                'scope': 'tags',
-                'attribute': 'name',
-            },
-            {
-                'attribute': 'id',
-                'scope': 'identity',
-            },
-            {
-                'attribute': 'updated_ts',
-                'scope': 'system',
-            }
-        ],
-    }
-
-    logger.debug(f"API request payload: {json_data}")
-    logger.debug(
-        f"Making POST request to {server}/api/management/v2/inventory/filters/search")
-
-    response = requests.post(
-        f'{server}/api/management/v2/inventory/filters/search',
-        headers={
-            'Authorization': f'Bearer {token}',
-        },
-        json=json_data,
-        verify=False
-    )
-
-    logger.debug(f"API response status: {response.status_code}")
-    logger.debug(f"API response headers: {dict(response.headers)}")
-
-    if response.status_code != 200:
-        logger.debug(f"API request failed with response: {response.text}")
-        UI.error_message("Unable to get the list of devices")
-        sys.exit(1)
-
-    devices = response.json()
-    logger.debug(f"Retrieved {len(devices)} devices from API")
-    return devices
+    table(["Deployment", "Value"], [
+        ["Name", deployment.get("name", "")], ["ID", deployment.get("id", "")],
+        ["Artifact", deployment.get("artifact_name", "")], ["Status", deployment.get("status", "")],
+        ["Created", deployment.get("created", "")], ["Finished", deployment.get("finished", "—") or "—"],
+        ["Devices", deployment.get("device_count", 0)],
+    ])
+    terminal = sum(int(stats.get(key, 0) or 0) for key in
+                   ("success", "failure", "noartifact", "already-installed", "already_installed", "aborted"))
+    active = sum(int(stats.get(key, 0) or 0) for key in
+                 ("downloading", "installing", "rebooting", "pause_before_installing",
+                  "pause_before_rebooting", "pause_before_committing"))
+    total = int(deployment.get("device_count", 0) or 0)
+    percent = min(100, round(terminal * 100 / total)) if total else 0
+    print(f"Progress: {terminal}/{total} ({percent}%) · {active} active")
+    table(["Device state", "Count"], [[key, value] for key, value in sorted(stats.items())])
 
 
-def print_welcome():
-    """ Print the welcome message """
-    UI.welcome_screen()
+def _require_ids(ids: tuple[str, ...]) -> list[str]:
+    """Require at least one device ID and convert the tuple to a list.
 
-
-def print_devices_list(devices):
-    """ Print the list of devices
-
-    :param devices: The list of devices
-    :return: The filtered devices
+    :param ids: Device identifiers supplied by the caller.
+    :returns: The supplied identifiers as a list.
+    :raises click.ClickException: No device identifiers were supplied.
     """
-    logger.debug(f"Processing {len(devices)} devices for display")
-
-    filtered_devices = []
-    for device in devices:
-        logger.debug(f"Processing device: {device['id']}")
-        device_name = 'Unknown'
-        for attribute in device['attributes']:
-            if 'timestamp' in attribute:
-                device_name = attribute['value']
-                logger.debug(f"Found device name: {device_name}")
-                break
-        device_polling = 'Unknown'
-        for attribute in device['attributes']:
-            if 'updated_ts' in str(attribute):
-                device_polling = attribute['value']
-                logger.debug(f"Found polling timestamp: {device_polling}")
-                break
-        filtered_devices.append(
-            {
-                'name': device_name,
-                'device_id': device['id'],
-                'polling': device_polling
-            }
-        )
-
-    # Sort devices by name
-    logger.debug(f"Sorting {len(filtered_devices)} devices by name")
-    filtered_devices.sort(key=lambda x: x['name'].lower())
-
-    # Add local IDs
-    for i, device in enumerate(filtered_devices, 1):
-        device['local_id'] = i
-
-    # Display devices in table
-    UI.device_table(filtered_devices)
-
-    logger.debug(f"Finished displaying {len(filtered_devices)} devices")
-    return filtered_devices
+    if not ids:
+        raise click.ClickException("at least one device ID is required")
+    return list(ids)
 
 
-def print_device_choice(devices):
-    """ Print the device choice and ask the user to choose one
-    
-    Supports filtering: type '/filter' to show only devices matching 'filter' (case-insensitive)
+class MenderGroup(click.Group):
+    """Accept a leading server/token pair alongside standard Click command syntax."""
 
-    :return: The device number (referring to original devices list)
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        """Translate positional credentials into global options before Click parsing.
+
+        :param ctx: Click context being populated.
+        :param args: Arguments excluding the executable name.
+        :returns: Unconsumed arguments returned by the Click group parser.
+        :raises click.UsageError: A positional server is supplied without a token.
+        """
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            if len(args) < 2 or args[1].startswith("-"):
+                raise click.UsageError("provide both SERVER and TOKEN: mrc SERVER TOKEN", ctx)
+            server, token, *remaining = args
+            args = [f"--server={server}", f"--token-value={token}", *remaining]
+        return super().parse_args(ctx, args)
+
+
+@click.group(cls=MenderGroup, invoke_without_command=True,
+             context_settings={"help_option_names": ["-h", "--help"]})
+@click.version_option(__version__, prog_name="mender-richer-cli")
+@click.option("--server", envvar="MENDER_SERVER", help="Mender server URL.")
+@click.option("--token", "token_path", type=click.Path(path_type=Path), help="File containing the JWT token.")
+@click.option("--token-value", envvar="MENDER_TOKEN", hide_input=True, help="JWT token or API key.")
+@click.option("-k", "--skip-verify", is_flag=True, help="Disable TLS certificate verification.")
+@click.option("-v", "--verbose", is_flag=True, help="Enable diagnostic request logging.")
+@click.option("--favorite", "open_favorite", is_flag=True, help="Open a remote terminal on the favorite device.")
+@click.pass_context
+def cli(ctx: click.Context, server: str | None, token_path: Path | None, token_value: str | None,
+        skip_verify: bool, verbose: bool, open_favorite: bool) -> None:
+    """A native Python CLI for Mender device operations.
+
+    Use mrc SERVER TOKEN to open the interactive picker, or
+    mrc SERVER TOKEN COMMAND to run a command with those credentials.
+
+    \f
+
+    :param ctx: Click invocation context receiving the shared application object.
+    :param server: Explicit server URL, if supplied.
+    :param token_path: Optional path to an authentication-token file.
+    :param token_value: Explicit authentication token, if supplied.
+    :param skip_verify: Whether to disable TLS certificate verification.
+    :param verbose: Whether to log request methods and URLs.
+    :param open_favorite: Whether to open the favorite device terminal when no command is given.
+    :raises click.ClickException: Configuration is invalid, authentication is missing, or no
+        favorite exists when requested.
     """
-    logger.debug(
-        f"Waiting for user to select device from {len(devices)} options")
-    logger.debug(
-        f"Available device IDs: {[device['local_id'] for device in devices]}")
-
-    current_devices = devices
-    
-    while True:
-        device_input = UI.input_prompt(
-            "Enter the device number you want to interact with (or '/filter' to search)")
-        
-        # Check for filter syntax: /filtertext
-        if device_input.startswith('/'):
-            filter_text = device_input[1:].strip()
-            logger.debug(f"User entered filter: '{filter_text}'")
-            
-            if filter_text:
-                # Filter devices by name (case-insensitive)
-                filtered = [
-                    device for device in devices
-                    if filter_text.lower() in device['name'].lower()
-                ]
-                logger.debug(f"Found {len(filtered)} devices matching filter")
-                
-                if filtered:
-                    # Create numbered copies for display without modifying originals
-                    display_devices = []
-                    for i, device in enumerate(filtered, 1):
-                        display_devices.append({
-                            **device,
-                            'local_id': i,
-                            '_original_id': device['local_id']
-                        })
-                    
-                    current_devices = display_devices
-                    UI.device_table(display_devices)
-                    continue
-                else:
-                    UI.warning_message(f"No devices found matching '{filter_text}'")
-                    # Keep current_devices as is
-                    continue
-            else:
-                # Just '/' with no filter text - reset to all devices
-                current_devices = devices
-                UI.device_table(devices)
-                continue
-        
-        try:
-            device_number = int(device_input)
-            logger.debug(f"User selected device number: {device_number}")
-
-            # Find the device in current_devices and get its original local_id
-            selected = None
-            for device in current_devices:
-                if device['local_id'] == device_number:
-                    selected = device
-                    break
-            
-            if selected is None:
-                logger.debug(f"Invalid device number selected: {device_number}")
-                UI.error_message(
-                    f"Invalid device number. Please choose from {', '.join(str(d['local_id']) for d in current_devices)}")
-                continue
-
-            logger.debug(f"Valid device selection: {device_number}")
-            # Return the original device's local_id
-            return selected['_original_id'] if '_original_id' in selected else selected['local_id']
-        except ValueError as e:
-            logger.debug(f"Invalid input for device selection: {e}")
-            UI.error_message("Please enter a valid number or use '/filter' syntax")
-
-
-def get_file_path(prompt, is_local=True, is_download=False):
-    """ Get a file path from user input with validation
-
-    :param prompt: The prompt to display
-    :param is_local: Whether this is a local file path
-    :param is_download: Whether this is for a download operation
-    :return: Valid file path
-    """
-    logger.debug(
-        f"Getting file path with prompt: {prompt}, is_local={is_local}, is_download={is_download}")
-
-    while True:
-        file_path = UI.input_prompt(prompt).strip()
-        logger.debug(f"User entered file path: '{file_path}'")
-
-        if not file_path:
-            logger.debug("Empty file path entered")
-            UI.error_message("File path cannot be empty")
-            continue
-
-        # For upload operations, check if local file exists
-        if is_local and not is_download and not os.path.exists(file_path):
-            logger.debug(f"File does not exist: {file_path}")
-            UI.error_message(f"File {file_path} does not exist")
-            continue
-
-        # For download operations, check if local path is a directory
-        if is_local and is_download:
-            logger.debug(f"Processing download path: {file_path}")
-            if os.path.isdir(file_path):
-                logger.debug(
-                    f"Path is directory, will use as destination: {file_path}")
-                # If it's a directory, we'll use it as the destination directory
-                # and keep the original filename
-                return file_path
-            elif os.path.exists(file_path):
-                logger.debug(
-                    f"File exists, asking for overwrite confirmation: {file_path}")
-                # If file exists, ask for confirmation to overwrite
-                if UI.confirmation_prompt(f'File {file_path} already exists. Overwrite?'):
-                    return file_path
-                else:
-                    continue
-            else:
-                logger.debug(
-                    f"File doesn't exist, checking parent directory: {file_path}")
-                # If file doesn't exist, check if parent directory exists
-                parent_dir = os.path.dirname(file_path)
-                if parent_dir and not os.path.exists(parent_dir):
-                    logger.debug(
-                        f"Parent directory does not exist: {parent_dir}")
-                    UI.error_message(
-                        f"Parent directory {parent_dir} does not exist")
-                    continue
-
-        logger.debug(f"Valid file path accepted: {file_path}")
-        return file_path
-
-
-def get_artifact_name(prompt):
-    """ Get an artifact name from user input
-
-    :param prompt: The prompt to display
-    :return: Artifact name
-    """
-    logger.debug(f"Getting artifact name with prompt: {prompt}")
-
-    while True:
-        artifact_name = UI.input_prompt(prompt).strip()
-        logger.debug(f"User entered artifact name: '{artifact_name}'")
-
-        if not artifact_name:
-            logger.debug("Empty artifact name entered")
-            UI.error_message("Artifact name cannot be empty")
-            continue
-
-        logger.debug(f"Valid artifact name accepted: {artifact_name}")
-        return artifact_name
-
-
-def upload_file_to_device(server, token, device_id, local_path, remote_path, args):
-    """ Upload a file to a device using mender-cli cp command
-
-    :param server: Mender server URL
-    :param token: Mender API token
-    :param device_id: Device ID
-    :param local_path: Local file path
-    :param remote_path: Remote file path on device
-    :param args: Command line arguments for SSL configuration
-    """
-    logger.debug(
-        f"Starting upload_file_to_device: server={server}, device_id={device_id}, local_path={local_path}, remote_path={remote_path}")
-
-    # Check if file exists
-    if not os.path.exists(local_path):
-        logger.debug(f"File does not exist: {local_path}")
-        UI.error_message(f"File {local_path} does not exist")
-        return False
-
-    logger.debug(
-        f"Uploading file {local_path} to {remote_path} on device {device_id} using mender-cli cp")
-
-    # Use mender-cli cp command for file upload
-    UI.info_message(
-        f"Initiating file upload from {local_path} to {device_id}:{remote_path}")
-
-    # Confirm operation
-    if not UI.confirmation_prompt('Proceed with file upload?'):
-        logger.debug("File upload cancelled by user")
-        UI.info_message("File upload cancelled")
-        return False
-
     try:
-        logger.debug("Executing mender-cli cp command for file upload")
-        # Execute mender-cli cp command
-        result = sp.run(
-            [
-                'mender-cli',
-                'cp',
-                local_path,
-                f'{device_id}:{remote_path}',
-                '--token-value',
-                token,
-                '--server',
-                server,
-                '-k'
-            ],
-            capture_output=True,
-            text=True
-        )
-
-        logger.debug(
-            f"mender-cli cp command completed with return code: {result.returncode}")
-        logger.debug(f"Command stdout: {result.stdout}")
-        logger.debug(f"Command stderr: {result.stderr}")
-
-        if result.returncode == 0:
-            UI.success_message(
-                f"File uploaded successfully from {local_path} to {device_id}:{remote_path}")
-            logger.debug(
-                f"File upload successful: {local_path} -> {device_id}:{remote_path}")
-            return True
+        config = Config.resolve(server=server, token_value=token_value, token_path=token_path,
+                                skip_verify=skip_verify, verbose=verbose)
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    ctx.obj = Context(config)
+    if ctx.invoked_subcommand not in {"login", "completion"} and not config.token:
+        raise click.ClickException("no token is available; run `python src/main.py login` or use --token-value")
+    if ctx.invoked_subcommand is None:
+        if open_favorite:
+            favorite = Favorites().get(config.server)
+            if not favorite:
+                raise click.ClickException("no favorite device for this server; mark one in the interactive device list")
+            _run(lambda: remote.terminal(ctx.obj.api, favorite["id"]))
         else:
-            UI.error_message("File upload failed")
-            if result.stderr:
-                UI.error_message(f"Error details: {result.stderr.strip()}")
-            logger.debug(f"File upload failed: {result.stderr}")
-            return False
-
-    except Exception as e:
-        logger.debug(f"Exception during file upload: {e}")
-        UI.error_message(f"File upload failed: {e}")
-        logger.debug(f"File upload failed: {e}")
-        return False
+            _run(lambda: interactive(ctx.obj))
 
 
-def download_file_from_device(server, token, device_id, remote_path, local_path, args):
-    """ Download a file from a device using mender-cli cp command
+def _run(fn: Any) -> Any:
+    """Translate expected operational failures into concise Click errors.
 
-    :param server: Mender server URL
-    :param token: Mender API token
-    :param device_id: Device ID
-    :param remote_path: Remote file path on device
-    :param local_path: Local file path to save to
-    :param args: Command line arguments for SSL configuration
+    :param fn: Zero-argument operation to execute.
+    :returns: The operation's return value.
+    :raises click.ClickException: The operation raises RuntimeError, ValueError, OSError, or
+        TimeoutError.
     """
-    logger.debug(
-        f"Starting download_file_from_device: server={server}, device_id={device_id}, remote_path={remote_path}, local_path={local_path}")
-    logger.debug(
-        f"Downloading file {remote_path} from device {device_id} to {local_path} using mender-cli cp")
-
-    # Use mender-cli cp command for file download
-    UI.info_message(
-        f"Initiating file download from {device_id}:{remote_path} to {local_path}")
-
-    # Confirm operation
-    if not UI.confirmation_prompt('Proceed with file download?'):
-        logger.debug("File download cancelled by user")
-        UI.info_message("File download cancelled")
-        return False
-
     try:
-        logger.debug("Executing mender-cli cp command for file download")
-        # Execute mender-cli cp command
-        result = sp.run(
-            [
-                'mender-cli',
-                'cp',
-                f'{device_id}:{remote_path}',
-                local_path,
-                '--token-value',
-                token,
-                '--server',
-                server,
-                '-k'
-            ],
-            capture_output=True,
-            text=True
-        )
-
-        logger.debug(
-            f"mender-cli cp command completed with return code: {result.returncode}")
-        logger.debug(f"Command stdout: {result.stdout}")
-        logger.debug(f"Command stderr: {result.stderr}")
-
-        if result.returncode == 0:
-            UI.success_message(
-                f"File downloaded successfully from {device_id}:{remote_path} to {local_path}")
-            logger.debug(
-                f"File download successful: {device_id}:{remote_path} -> {local_path}")
-            return True
-        else:
-            UI.error_message("File download failed")
-            if result.stderr:
-                UI.error_message(f"Error details: {result.stderr.strip()}")
-            logger.debug(f"File download failed: {result.stderr}")
-            return False
-
-    except Exception as e:
-        logger.debug(f"Exception during file download: {e}")
-        UI.error_message(f"File download failed: {e}")
-        logger.debug(f"File download failed: {e}")
-        return False
+        return fn()
+    except (RuntimeError, ValueError, OSError, TimeoutError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
-def get_available_artifacts(server, token, args):
-    """ Get list of available artifacts from Mender server
+@cli.command("interactive")
+@click.pass_obj
+def interactive_command(app: Context) -> None:
+    """Open the searchable interactive interface.
 
-    :param server: Mender server URL
-    :param token: Mender API token
-    :param args: Command line arguments for SSL configuration
-    :return: List of artifacts or None if failed
+    \f
+
+    :param app: Shared application configuration and API client.
     """
-    logger.debug(f"Getting available artifacts from server: {server}")
-
-    try:
-        verify_ssl = not args.insecure if hasattr(args, 'insecure') else True
-        logger.debug(f"SSL verification: {verify_ssl}")
-
-        # Get list of available artifacts
-        logger.debug(
-            f"Making GET request to {server}/api/management/v1/deployments/artifacts")
-        response = requests.get(
-            f'{server}/api/management/v1/deployments/artifacts',
-            headers={
-                'Authorization': f'Bearer {token}',
-            },
-            verify=verify_ssl,
-            timeout=30
-        )
-
-        logger.debug(f"API response status: {response.status_code}")
-        logger.debug(f"API response headers: {dict(response.headers)}")
-
-        if response.status_code != 200:
-            logger.debug(
-                f"Failed to get artifacts list: {response.status_code} - {response.text}")
-            UI.error_message(
-                f"Failed to get artifacts list. Status: {response.status_code}")
-            return None
-
-        artifacts = response.json()
-        logger.debug(f"Retrieved {len(artifacts)} artifacts from API")
-        logger.debug(f"Available artifacts: {artifacts}")
-        return artifacts
-
-    except requests.exceptions.RequestException as e:
-        logger.debug(f"Failed to get artifacts list: {e}")
-        UI.error_message(f"Failed to get artifacts list: {e}")
-        return None
+    _run(lambda: interactive(app))
 
 
-def print_artifact_list(artifacts):
-    """ Print the list of available artifacts
+@cli.command("login")
+@click.option("--username", help="Account email.")
+@click.option("--password", hide_input=True, help="Account password (prefer hidden prompt).")
+@click.option("--2fa-code", "two_factor_code", help="Two-factor authentication code.")
+@click.pass_obj
+def login_command(app: Context, username: str | None, password: str | None,
+                  two_factor_code: str | None) -> None:
+    """Authenticate and save the token locally.
 
-    :param artifacts: List of artifacts
-    :return: Selected artifact name or None
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param username: Login email; prompted for when neither supplied nor configured.
+    :param password: Login password; prompted for with hidden input when unavailable.
+    :param two_factor_code: Optional two-factor authentication code.
     """
-    logger.debug(f"Displaying {len(artifacts)} artifacts for user selection")
-
-    if not artifacts:
-        logger.debug("No artifacts available")
-        UI.error_message("No artifacts available")
-        return None
-
-    artifact_list = []
-    for i, artifact in enumerate(artifacts, 1):
-        artifact_name = artifact.get('name', 'Unknown')
-        artifact_id = artifact.get('id', 'Unknown')
-        artifact_description = artifact.get('description', 'No description')
-
-        logger.debug(
-            f"Processing artifact {i}: {artifact_name} ({artifact_id})")
-
-        artifact_list.append({
-            'id': i,
-            'name': artifact_name,
-            'artifact_id': artifact_id,
-            'description': artifact_description
-        })
-
-        # Create an artifact table
-        artifact_table = Table(
-            title=f"Artifact {i}: {artifact_name}",
-            title_style=f"bold {Colors.PRIMARY}",
-            border_style=Colors.BORDER,
-            box=ROUNDED,
-            show_header=False
-        )
-
-        artifact_table.add_column(
-            "Property", style=f"bold {Colors.SECONDARY}", width=20)
-        artifact_table.add_column("Value", style=Colors.TEXT_PRIMARY)
-
-        artifact_table.add_row("ID", artifact_id)
-        artifact_table.add_row("Name", artifact_name)
-        artifact_table.add_row("Description", artifact_description)
-
-        console.print(artifact_table)
-        console.print()  # Add some spacing
-
-    while True:
-        choice_input = UI.input_prompt(
-            "Enter the artifact number you want to deploy (or 0 to cancel)")
-        try:
-            choice = int(choice_input)
-            logger.debug(f"User selected artifact number: {choice}")
-            if choice == 0:
-                logger.debug("User cancelled artifact selection")
-                return None
-            if choice < 1 or choice > len(artifact_list):
-                logger.debug(f"Invalid artifact number selected: {choice}")
-                UI.error_message(
-                    f"Invalid artifact number. Please choose from 1-{len(artifact_list)}")
-                continue
-
-            selected_artifact = artifact_list[choice - 1]
-            logger.debug(
-                f"Selected artifact: {selected_artifact['name']} ({selected_artifact['artifact_id']})")
-            return selected_artifact['name']
-
-        except ValueError as e:
-            logger.debug(f"Invalid input for artifact selection: {e}")
-            UI.error_message("Please enter a valid number")
+    username = username or app.config.username
+    password = password or app.config.password
+    if not username:
+        username = click.prompt("Email address")
+    if not password:
+        password = click.prompt("Password", hide_input=True)
+    token = _run(lambda: app.api.login(username, password, two_factor_code))
+    app.config.save_token(token)
+    _say(f"Login successful; token saved to {app.config.token_path}.")
 
 
-def deploy_artifact_to_device(server, token, device_id, artifact_name, args):
-    """ Deploy an artifact to a device using Mender API
+@cli.group("devices")
+def devices_group() -> None:
+    """Browse devices and their inventory."""
 
-    :param server: Mender server URL
-    :param token: Mender API token
-    :param device_id: Device ID
-    :param artifact_name: Artifact name to deploy
-    :param args: Command line arguments for SSL configuration
+
+@devices_group.command("list")
+@click.option("-N", "--per-page", type=click.IntRange(min=1), default=20, show_default=True)
+@click.option("-P", "--page", type=click.IntRange(min=1), default=1, show_default=True)
+@click.option("-r", "--raw", is_flag=True, help="Output JSON.")
+@click.pass_obj
+def devices_list(app: Context, per_page: int, page: int, raw: bool) -> None:
+    """List devices.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param per_page: Maximum records requested per page.
+    :param page: One-based page number.
+    :param raw: Whether to print JSON instead of formatted output.
     """
-    logger.debug(
-        f"Starting deploy_artifact_to_device: server={server}, device_id={device_id}, artifact_name={artifact_name}")
-    logger.debug(
-        f"Attempting to deploy artifact {artifact_name} to device {device_id}")
-
-    try:
-        verify_ssl = not args.insecure if hasattr(args, 'insecure') else True
-        logger.debug(f"SSL verification: {verify_ssl}")
-
-        # Create deployment
-        deployment_data = {
-            'name': f'Deployment of {artifact_name} to {device_id}',
-            'artifact_name': artifact_name,
-            'devices': [device_id]
-        }
-
-        logger.debug(f"Deployment data: {deployment_data}")
-        logger.debug(
-            f"Making POST request to {server}/api/management/v1/deployments/deployments")
-
-        response = requests.post(
-            f'{server}/api/management/v1/deployments/deployments',
-            headers={
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json'
-            },
-            json=deployment_data,
-            verify=verify_ssl,
-            timeout=30
-        )
-
-        logger.debug(f"API response status: {response.status_code}")
-        logger.debug(f"API response headers: {dict(response.headers)}")
-        logger.debug(f"API response body: {response.text}")
-
-        if response.status_code != 201:
-            logger.debug(
-                f"Failed to create deployment: {response.status_code} - {response.text}")
-            UI.error_message(
-                f"Failed to create deployment. Status: {response.status_code}")
-            if response.status_code == 404:
-                UI.warning_message(
-                    "Artifact may not exist or device may not be compatible")
-            return False
-
-        UI.success_message(
-            f"Deployment created successfully: {artifact_name} to {device_id}")
-        logger.debug(
-            f"Deployment successful for artifact {artifact_name} to device {device_id}")
-        return True
-
-    except requests.exceptions.RequestException as e:
-        logger.debug(f"Deployment failed: {e}")
-        UI.error_message(f"Deployment failed: {e}")
-        return False
-
-
-def get_device_inventory(server, token, device_id):
-    """ Get the full inventory details for a specific device
-
-    :param server: Mender server URL
-    :param token: Mender API token
-    :param device_id: Device ID to get inventory for
-    :return: Device inventory data or None if failed
-    """
-
-    logger.debug(
-        f"Getting inventory for device {device_id} from server: {server}")
-
-    try:
-        logger.debug(
-            f"Making GET request to {server}/api/management/v1/inventory/devices/{device_id}")
-
-        response = requests.get(
-            f'{server}/api/management/v1/inventory/devices/{device_id}',
-            headers={
-                'Authorization': f'Bearer {token}',
-            },
-            verify=False
-        )
-
-        logger.debug(f"API response status: {response.status_code}")
-        logger.debug(f"API response headers: {dict(response.headers)}")
-
-        if response.status_code != 200:
-            logger.debug(
-                f"Failed to get device inventory: {response.status_code} - {response.text}")
-            UI.error_message(
-                f"Failed to get device inventory. Status: {response.status_code}")
-            return None
-
-        inventory_data = response.json()
-        logger.debug(f"Retrieved inventory data for device {device_id}")
-        logger.debug(
-            f"Inventory data structure: {list(inventory_data.keys())}")
-        return inventory_data
-
-    except requests.exceptions.RequestException as e:
-        logger.debug(f"Failed to get device inventory: {e}")
-        UI.error_message(f"Failed to get device inventory: {e}")
-        return None
-
-
-def print_device_inventory(inventory_data, device_name, device_id):
-    """ Print the device inventory in a nice table format
-
-    :param inventory_data: The inventory data from the API
-    :param device_name: The device name for display
-    :param device_id: The device ID for display
-    """
-    logger.debug(
-        f"Displaying inventory for device {device_name} ({device_id})")
-
-    if not inventory_data:
-        logger.debug("No inventory data available")
-        UI.error_message("No inventory data available")
-        return
-
-    # Create main inventory table
-    inventory_table = Table(
-        title=f"Device Inventory: {device_name} - {device_id}",
-        title_style=f"bold {Colors.PRIMARY}",
-        border_style=Colors.BORDER,
-        box=ROUNDED,
-        show_header=True,
-        header_style=f"bold {Colors.SECONDARY}"
-    )
-
-    inventory_table.add_column(
-        "Scope", style=f"bold {Colors.SECONDARY}", width=15)
-    inventory_table.add_column(
-        "Attribute", style=f"bold {Colors.SECONDARY}", width=25)
-    inventory_table.add_column("Value", style=Colors.TEXT_PRIMARY)
-
-    # Process each scope in the inventory data
-    for _, attributes in inventory_data.items():
-        logger.debug(f"Processing attributes: {len(attributes)} attributes")
-        if isinstance(attributes, list):
-            # Handle list format
-            for attribute in attributes:
-                attr_name = attribute.get(
-                    'name', attribute.get('attribute', 'unknown'))
-                attr_value = attribute.get(
-                    'value', attribute.get('data', 'N/A'))
-                attr_scope = attribute.get(
-                    'scope', attribute.get('scope', 'unknown'))
-                inventory_table.add_row(attr_scope, attr_name, str(attr_value))
-
-    # Display the inventory table
-    console.print(inventory_table)
-
-
-def print_command():
-    """ Print the command choice and ask the user to choose one
-
-    :return: The command number
-    """
-    logger.debug("Displaying command menu and waiting for user selection")
-
-    UI.command_menu()
-
-    while True:
-        command_input = UI.input_prompt("Enter the command you want to run")
-        try:
-            command = int(command_input)
-            logger.debug(f"User selected command: {command}")
-            if command not in [1, 2, 3, 4, 5, 6]:
-                logger.debug(f"Invalid command selected: {command}")
-                UI.error_message("Invalid command. Please choose from 1-6")
-                continue
-
-            logger.debug(f"Valid command selected: {command}")
-            return command
-        except ValueError as e:
-            logger.debug(f"Invalid input for command selection: {e}")
-            UI.error_message("Please enter a valid number")
-
-
-def print_port_forward():
-    """ Print the port forward choices, and ask the user to choose the
-    local and remote ip:port to forward.
-
-    :return: The local and remote ports"""
-    logger.debug("Getting port forwarding configuration from user")
-
-    def validate_port_input(input_str, input_type):
-        """Validate port input which can be just a port number or ip:port"""
-        if ':' in input_str:
-            # ip:port format
-            parts = input_str.split(':')
-            if len(parts) != 2:
-                return None, f"Invalid {input_type} format. Use 'port' or 'ip:port'"
-
-            ip_part, port_part = parts
-
-            # Validate IP address (basic validation)
-            if not ip_part:
-                return None, f"IP address cannot be empty in {input_type}"
-
-            # Validate port
-            try:
-                port = int(port_part)
-                if port < 1 or port > 65535:
-                    return None, f"Invalid port number in {input_type}. Please enter a value between 1 and 65535"
-                return input_str, None
-            except ValueError:
-                return None, f"Invalid port number in {input_type}. Please enter a valid number"
-        else:
-            # Just port number
-            try:
-                port = int(input_str)
-                if port < 1 or port > 65535:
-                    return None, f"Invalid port number in {input_type}. Please enter a value between 1 and 65535"
-                return input_str, None
-            except ValueError:
-                return None, f"Invalid port number in {input_type}. Please enter a valid number"
-
-    while True:
-        remote_input = UI.input_prompt(
-            "Enter the remote port you want to forward (format: port or ip:port)")
-        remote_validated, error = validate_port_input(
-            remote_input, "remote port")
-        if remote_validated is not None:
-            logger.debug(f"User entered remote port: {remote_validated}")
-            remote = remote_validated
-            break
-        else:
-            logger.debug(f"Invalid remote port input: {error}")
-            UI.error_message(error)
-            continue
-
-    while True:
-        local_input = UI.input_prompt(
-            "Enter the local port you want to forward to (format: port or ip:port)")
-        local_validated, error = validate_port_input(local_input, "local port")
-        if local_validated is not None:
-            logger.debug(f"User entered local port: {local_validated}")
-            local = local_validated
-            break
-        else:
-            logger.debug(f"Invalid local port input: {error}")
-            UI.error_message(error)
-            continue
-
-    logger.debug(f"Port forwarding configuration: {local}:{remote}")
-    return local, remote
-
-
-def check_mender_cli():
-    """ Check if the mender-cli is installed """
-    logger.debug("Checking if mender-cli is installed")
-
-    output = sp.getoutput('mender-cli --version')
-    logger.debug(f"mender-cli version check output: {output}")
-    if 'mender-cli version' not in output:
-        logger.debug("mender-cli not found or invalid version")
-        UI.error_message(
-            "mender-cli is not installed. Head to https://github.com/mendersoftware/mender-cli to install it!")
-        sys.exit(1)
-
-    logger.debug("mender-cli is properly installed")
-    UI.success_message("mender-cli is properly installed")
-
-
-def main():
-    """ Main function """
-    logger.debug("Starting main function")
-
-    # Parse the arguments (server URL and API token)
-    args = parse_args()
-
-    # Configure logging level
-    if hasattr(args, 'debug') and args.debug:
-        logger.setLevel(logging.DEBUG)
-        logger.debug("Debug logging enabled")
+    rows, _ = _run(lambda: app.api.list_page(DEVICES, page, per_page))
+    if raw:
+        print_json(rows)
     else:
-        logger.debug("Debug logging disabled")
+        table(["Device ID", "Status", "Identity", "Updated"], [
+            [row.get("id", ""), row.get("status", ""),
+             json.dumps(row.get("identity_data", {}), separators=(",", ":")), row.get("updated_ts", "")]
+            for row in rows])
 
-    # Print the welcome message
-    logger.debug("Displaying welcome message")
-    print_welcome()
 
-    # Check if the mender-cli is installed
-    logger.debug("Checking mender-cli installation")
-    check_mender_cli()
+@devices_group.command("inventory")
+@click.argument("device_id")
+@click.option("--raw", is_flag=True, help="Output JSON.")
+@click.pass_obj
+def inventory_command(app: Context, device_id: str, raw: bool) -> None:
+    """Show the complete inventory for a device.
 
-    # Main loop to interact with the devices
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param device_id: Target device identifier.
+    :param raw: Whether to print JSON instead of formatted output.
+    """
+    inventory = _run(lambda: app.api.inventory(device_id))
+    if raw:
+        print_json(inventory)
+    elif sys.stdin.isatty() and sys.stdout.isatty():
+        rows = flatten_inventory(inventory)
+        pick(f"Inventory for {device_id}", ["Attribute", "Value"], rows, viewer=True)
+    else:
+        table(["Attribute", "Value"], flatten_inventory(inventory))
+
+
+@cli.group("artifacts")
+def artifacts_group() -> None:
+    """Manage artifacts and create deployments."""
+
+
+@artifacts_group.command("list")
+@click.option("-N", "--per-page", type=click.IntRange(min=1), default=20, show_default=True)
+@click.option("-P", "--page", type=click.IntRange(min=1), default=1, show_default=True)
+@click.option("-r", "--raw", is_flag=True, help="Output JSON.")
+@click.option("--sort", type=click.Choice(["name", "type"], case_sensitive=False), default="name")
+@click.pass_obj
+def artifacts_list(app: Context, per_page: int, page: int, raw: bool, sort: str) -> None:
+    """List available artifacts.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param per_page: Maximum records requested per page.
+    :param page: One-based page number.
+    :param raw: Whether to print JSON instead of formatted output.
+    :param sort: Artifact sort key: name or type.
+    """
+    rows, _ = _run(lambda: app.api.list_page(ARTIFACT_LIST, page, per_page))
+    if raw:
+        print_json(rows)
+        return
+    rows.sort(key=lambda a: ((artifact_kind(a).casefold(), a.get("name", "").casefold())
+                             if sort.casefold() == "type" else (a.get("name", "").casefold(),)))
+    table(["Name", "Type", "Artifact ID", "Size", "Description"], [
+        [r.get("name", ""), artifact_kind(r), r.get("id", ""), human_size(int(r.get("size", 0))), r.get("description", "—")]
+        for r in rows])
+
+
+@artifacts_group.command("upload")
+@click.argument("artifact", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--description", default="", help="Artifact description.")
+@click.option("--no-progress", is_flag=True, help="Hide upload progress.")
+@click.pass_obj
+def artifacts_upload(app: Context, artifact: Path, description: str, no_progress: bool) -> None:
+    """Upload an artifact to the server.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param artifact: Local Mender artifact archive to upload.
+    :param description: Description attached to the artifact.
+    :param no_progress: Whether to suppress transfer progress.
+    """
+    _run(lambda: app.api.upload_artifact(artifact, description, not no_progress))
+    _say("Artifact uploaded.")
+
+
+@artifacts_group.command("download")
+@click.argument("artifact_id")
+@click.option("--destination-path", type=click.Path(path_type=Path), default=Path("."), show_default=True)
+@click.option("--no-progress", is_flag=True, help="Hide download progress.")
+@click.pass_obj
+def artifacts_download(app: Context, artifact_id: str, destination_path: Path, no_progress: bool) -> None:
+    """Download an artifact by ID.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param artifact_id: Artifact identifier.
+    :param destination_path: Local output filename or existing directory.
+    :param no_progress: Whether to suppress transfer progress.
+    """
+    path = _run(lambda: app.api.download_artifact(artifact_id, destination_path, not no_progress))
+    _say(f"Artifact saved to {path}.")
+
+
+@artifacts_group.command("delete")
+@click.argument("artifact_id")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+@click.pass_obj
+def artifacts_delete(app: Context, artifact_id: str, yes: bool) -> None:
+    """Delete an artifact.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param artifact_id: Artifact identifier.
+    :param yes: Whether to skip the confirmation prompt.
+    """
+    if confirm(f"Permanently delete artifact {artifact_id}?", yes):
+        _run(lambda: app.api.delete_artifact(artifact_id))
+        _say("Artifact deleted.")
+
+
+@artifacts_group.command("deploy")
+@click.argument("artifact_name")
+@click.argument("device_ids", nargs=-1, required=True)
+@click.option("--name", "deployment_name", help="Deployment name.")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+@click.pass_obj
+def artifacts_deploy(app: Context, artifact_name: str, device_ids: tuple[str, ...],
+                     deployment_name: str | None, yes: bool) -> None:
+    """Create a deployment for one or more devices.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param artifact_name: Artifact name to deploy.
+    :param device_ids: Identifiers of the devices receiving the deployment.
+    :param deployment_name: Optional deployment name; generated when omitted.
+    :param yes: Whether to skip the confirmation prompt.
+    """
+    ids = list(device_ids)
+    target = app.api.display_name(ids[0]) + f" ({ids[0]})" if len(ids) == 1 else f"{len(ids)} devices"
+    if confirm(f"Deploy {artifact_name} to {target}?", yes):
+        _run(lambda: app.api.deploy(artifact_name, ids, deployment_name))
+        _say("Deployment created.")
+
+
+@cli.group("deployments")
+def deployments_group() -> None:
+    """Inspect, follow, and cancel deployments."""
+
+
+@deployments_group.command("list")
+@click.option("-N", "--per-page", type=click.IntRange(min=1), default=20, show_default=True)
+@click.option("-P", "--page", type=click.IntRange(min=1), default=1, show_default=True)
+@click.option("-r", "--raw", is_flag=True, help="Output JSON.")
+@click.option("--status", type=click.Choice(["scheduled", "pending", "inprogress", "finished"]))
+@click.option("--search", help="Search deployment names and descriptions.")
+@click.pass_obj
+def deployments_list(app: Context, per_page: int, page: int, raw: bool,
+                     status: str | None, search: str | None) -> None:
+    """List deployments.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param per_page: Maximum records requested per page.
+    :param page: One-based page number.
+    :param raw: Whether to print JSON instead of formatted output.
+    :param status: Optional deployment status filter.
+    :param search: Optional deployment search text.
+    """
+    rows, total = _run(lambda: app.api.deployments(page, per_page, status, search))
+    if raw:
+        print_json(rows)
+        return
+    table(["Name", "Artifact", "Status", "Devices", "Created", "Deployment ID"], [
+        [r.get("name", ""), r.get("artifact_name", ""), r.get("status", ""),
+         r.get("device_count", 0), r.get("created", ""), r.get("id", "")] for r in rows])
+    if total is not None:
+        print(f"Page {page} · {len(rows)} shown · {total} total")
+
+
+@deployments_group.command("show")
+@click.argument("deployment_id")
+@click.option("--raw", is_flag=True, help="Output JSON.")
+@click.pass_obj
+def deployments_show(app: Context, deployment_id: str, raw: bool) -> None:
+    """Show deployment details and device statistics.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param deployment_id: Deployment identifier.
+    :param raw: Whether to print JSON instead of formatted output.
+    """
+    deployment, stats = _run(lambda: app.api.deployment_details(deployment_id))
+    if raw:
+        print_json({"deployment": deployment, "statistics": stats})
+    else:
+        _deployment_table(deployment, stats)
+
+
+@deployments_group.command("watch")
+@click.argument("deployment_id")
+@click.option("--interval", type=click.IntRange(min=1), default=2, show_default=True)
+@click.pass_obj
+def deployments_watch(app: Context, deployment_id: str, interval: int) -> None:
+    """Refresh deployment progress until it finishes or Ctrl+C is pressed.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param deployment_id: Deployment identifier.
+    :param interval: Seconds between progress refreshes.
+    """
     try:
-        logger.debug("Entering main device interaction loop")
-        while 1:
-            logger.debug("Starting new device interaction cycle")
-            # Get the list of devices
-            logger.debug("Fetching devices list from server")
-            devices = get_devices_list(args.server, args.token)
-
-            # Print the devices list
-            logger.debug("Displaying devices list to user")
-            filtered_devices = print_devices_list(devices)
-
-            # Ask the user to choose a device
-            logger.debug("Waiting for user to select device")
-            device = print_device_choice(filtered_devices)
-            logger.debug(f"User selected device: {device}")
-
-            # Ask the user to choose a command
-            logger.debug("Displaying command menu")
-            command = print_command()
-            logger.debug(f"User selected command: {command}")
-
-            while 1:
-                logger.debug(
-                    f"Executing command {command} for device {device}")
-                # Run the reverse shell command
-                if command == 1:
-                    logger.debug("Starting terminal session")
-                    sp.run(
-                        [
-                            'mender-cli',
-                            'terminal',
-                            filtered_devices[device-1]['device_id'],
-                            '--token-value',
-                            args.token,
-                            '--server',
-                            args.server,
-                            '-k'
-                        ]
-                    )
-                    logger.debug("Terminal session completed")
-                    break
-
-                # Run the port forward command
-                elif command == 2:
-                    logger.debug("Setting up port forwarding")
-                    try:
-                        local, remote = print_port_forward()
-                        logger.debug(
-                            f"Port forwarding configuration: {local}:{remote}")
-                    except KeyboardInterrupt:
-                        logger.debug(
-                            "Port forwarding setup interrupted by user")
-                        # So the user can go back to the device list, without quitting
-                        # the program
-                        break
-                    try:
-                        logger.debug("Starting port forwarding session")
-                        sp.run(
-                            [
-                                'mender-cli',
-                                'port-forward',
-                                filtered_devices[device-1]['device_id'],
-                                f'{local}:{remote}',
-                                '--token-value',
-                                args.token,
-                                '--server',
-                                args.server,
-                                '-k',
-                            ]
-                        )
-                        logger.debug("Port forwarding session completed")
-                    except KeyboardInterrupt:
-                        logger.debug(
-                            "Port forwarding session interrupted by user")
-                        # So the user can go back to the device list, without quitting
-                        # the program
-                        break
-
-                # Run file upload command
-                elif command == 3:
-                    logger.debug("Starting file upload process")
-                    device_name = filtered_devices[device-1]['name']
-                    device_id = filtered_devices[device-1]['device_id']
-                    logger.debug(
-                        f"Uploading to device: {device_name} ({device_id})")
-
-                    # Get local and remote file paths
-                    logger.debug("Getting file paths from user")
-                    local_path = get_file_path(
-                        'Enter local file path to upload: ')
-                    remote_path = get_file_path(
-                        'Enter remote file path on device: ', is_local=False)
-
-                    # Confirm operation
-                    UI.info_message(
-                        f"Confirm file upload to {device_name} ({device_id})")
-                    UI.info_message(f"Local: {local_path}")
-                    UI.info_message(f"Remote: {remote_path}")
-                    if not UI.confirmation_prompt('Proceed with file upload?'):
-                        logger.debug("File upload cancelled by user")
-                        UI.info_message("File upload cancelled")
-                        continue
-
-                    # Execute upload
-                    logger.debug("Executing file upload")
-                    success = upload_file_to_device(
-                        args.server,
-                        args.token,
-                        device_id,
-                        local_path,
-                        remote_path,
-                        args
-                    )
-
-                    if success:
-                        logger.debug("File upload completed successfully")
-                        UI.success_message("File upload operation completed")
-                    else:
-                        logger.debug("File upload failed")
-                        UI.error_message("File upload failed")
-
-                    break
-
-                # Run file download command
-                elif command == 4:
-                    logger.debug("Starting file download process")
-                    device_name = filtered_devices[device-1]['name']
-                    device_id = filtered_devices[device-1]['device_id']
-                    logger.debug(
-                        f"Downloading from device: {device_name} ({device_id})")
-
-                    # Get remote and local file paths
-                    logger.debug("Getting file paths from user")
-                    remote_path = get_file_path(
-                        'Enter remote file path on device: ', is_local=False)
-                    local_path = get_file_path(
-                        'Enter local file path to save to: ', is_local=True, is_download=True)
-
-                    # Confirm operation
-                    UI.info_message(
-                        f"Confirm file download from {device_name} ({device_id})")
-                    UI.info_message(f"Remote: {remote_path}")
-                    UI.info_message(f"Local: {local_path}")
-                    if not UI.confirmation_prompt('Proceed with file download?'):
-                        logger.debug("File download cancelled by user")
-                        UI.info_message("File download cancelled")
-                        continue
-
-                    # Execute download
-                    logger.debug("Executing file download")
-                    success = download_file_from_device(
-                        args.server,
-                        args.token,
-                        device_id,
-                        remote_path,
-                        local_path,
-                        args
-                    )
-
-                    if success:
-                        logger.debug("File download completed successfully")
-                        UI.success_message("File download operation completed")
-                    else:
-                        logger.debug("File download failed")
-                        UI.error_message("File download failed")
-
-                    break
-
-                # Run artifact deployment command
-                elif command == 5:
-                    logger.debug("Starting artifact deployment process")
-                    device_name = filtered_devices[device-1]['name']
-                    device_id = filtered_devices[device-1]['device_id']
-                    logger.debug(
-                        f"Deploying to device: {device_name} ({device_id})")
-
-                    # Get available artifacts
-                    logger.debug("Fetching available artifacts")
-                    artifacts = get_available_artifacts(
-                        args.server, args.token, args)
-                    if artifacts is None:
-                        logger.debug("Failed to get artifacts list")
-                        UI.error_message("Cannot proceed with deployment")
-                        continue
-
-                    # Show artifact list and let user select
-                    logger.debug("Displaying artifact list for user selection")
-                    artifact_name = print_artifact_list(artifacts)
-                    if artifact_name is None:
-                        logger.debug("Artifact deployment cancelled by user")
-                        UI.info_message("Artifact deployment cancelled")
-                        continue
-
-                    # Confirm operation
-                    UI.info_message(
-                        f"Confirm artifact deployment to {device_name} ({device_id})")
-                    UI.info_message(f"Artifact: {artifact_name}")
-                    UI.info_message(f"Server: {args.server}")
-                    if not UI.confirmation_prompt('Proceed with artifact deployment?'):
-                        logger.debug("Artifact deployment cancelled by user")
-                        UI.info_message("Artifact deployment cancelled")
-                        continue
-
-                    # Execute deployment
-                    logger.debug("Executing artifact deployment")
-                    success = deploy_artifact_to_device(
-                        args.server,
-                        args.token,
-                        device_id,
-                        artifact_name,
-                        args
-                    )
-
-                    if success:
-                        logger.debug(
-                            "Artifact deployment initiated successfully")
-                        UI.success_message(
-                            f"Artifact deployment initiated: {artifact_name} to {device_name}")
-                    else:
-                        logger.debug("Artifact deployment failed")
-                        UI.error_message("Artifact deployment failed")
-
-                    break
-
-                # Run inventory command
-                elif command == 6:
-                    logger.debug("Starting inventory display process")
-                    device_name = filtered_devices[device-1]['name']
-                    device_id = filtered_devices[device-1]['device_id']
-                    logger.debug(
-                        f"Displaying inventory for device: {device_name} ({device_id})")
-
-                    # Get device inventory
-                    logger.debug("Fetching device inventory data")
-                    inventory_data = get_device_inventory(
-                        args.server, args.token, device_id)
-                    if inventory_data is None:
-                        logger.debug("Failed to get inventory data")
-                        UI.error_message("Cannot display inventory")
-                        continue
-
-                    # Display inventory
-                    logger.debug("Displaying inventory data")
-                    print_device_inventory(
-                        inventory_data, device_name, device_id)
-
-                    break
+        while True:
+            deployment, stats = _run(lambda: app.api.deployment_details(deployment_id))
+            if sys.stdout.isatty():
+                print("\033[H\033[2J", end="")
+            _deployment_table(deployment, stats)
+            if deployment.get("finished") or str(deployment.get("status", "")).casefold() == "finished":
+                _say("Deployment finished.")
+                return
+            time.sleep(interval)
     except KeyboardInterrupt:
-        logger.debug("Main loop interrupted by user")
-        UI.info_message("\nGoodbye!")
-        sys.exit(0)
-    except Exception as e:
-        logger.debug(f"Unexpected error in main loop: {e}")
-        UI.error_message(f"An unexpected error occurred: {e}")
-        sys.exit(1)
+        _say("Watch stopped; the deployment is still running.")
 
 
-if __name__ == '__main__':
+@deployments_group.command("cancel")
+@click.argument("deployment_id")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+@click.pass_obj
+def deployments_cancel(app: Context, deployment_id: str, yes: bool) -> None:
+    """Cancel an unfinished deployment.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param deployment_id: Deployment identifier.
+    :param yes: Whether to skip the confirmation prompt.
+    """
+    deployment, _ = _run(lambda: app.api.deployment_details(deployment_id))
+    if deployment.get("finished") or str(deployment.get("status", "")).casefold() == "finished":
+        _say("This deployment is already finished and cannot be cancelled.")
+        return
+    if confirm(f"Cancel deployment {deployment.get('name', '')} ({deployment_id})?", yes):
+        _run(lambda: app.api.cancel_deployment(deployment_id))
+        _say("Deployment cancellation requested.")
+
+
+@cli.command("terminal")
+@click.argument("device_id")
+@click.pass_obj
+def terminal_command(app: Context, device_id: str) -> None:
+    """Open a native remote terminal.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param device_id: Target device identifier.
+    """
+    _run(lambda: remote.terminal(app.api, device_id))
+
+
+@cli.command("port-forward")
+@click.argument("device_id")
+@click.argument("mappings", nargs=-1, required=True)
+@click.option("--bind", "bind_host", default="127.0.0.1", show_default=True)
+@click.pass_obj
+def port_forward_command(app: Context, device_id: str, mappings: tuple[str, ...], bind_host: str) -> None:
+    """Forward local TCP or UDP ports to a device.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param device_id: Target device identifier.
+    :param mappings: Port forwarding specifications accepted by :func:`remote.parse_mapping`.
+    :param bind_host: Local interface address for forwarded ports.
+    """
+    _run(lambda: remote.port_forward(app.api, device_id, bind_host, list(mappings)))
+
+
+@cli.command("cp")
+@click.argument("source")
+@click.argument("destination")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+@click.pass_obj
+def cp_command(app: Context, source: str, destination: str, yes: bool) -> None:
+    """Copy a local file to or from DEVICE_ID:PATH.
+
+    \f
+
+    :param app: Shared application configuration and API client.
+    :param source: Local source filename or remote source in ``DEVICE_ID:PATH`` form.
+    :param destination: Local destination or remote destination in ``DEVICE_ID:PATH`` form.
+    :param yes: Whether to skip the confirmation prompt.
+    :raises click.ClickException: Neither endpoint is remote, both are remote, or the transfer
+        fails.
+    """
+    source_remote = _parse_remote(source)
+    destination_remote = _parse_remote(destination)
+    if source_remote and destination_remote:
+        raise click.ClickException("copying between two devices is not supported")
+    if not source_remote and not destination_remote:
+        raise click.ClickException("the source or destination must use DEVICE_ID:PATH")
+    if confirm(f"Copy {source} to {destination}?", yes):
+        if destination_remote:
+            device_id, path = destination_remote
+            _run(lambda: app.api.upload_file(device_id, Path(source), path))
+            _say("File uploaded.")
+        else:
+            device_id, path = source_remote  # type: ignore[misc]
+            result = _run(lambda: app.api.download_file(device_id, path, Path(destination)))
+            _say(f"File saved to {result}.")
+
+
+def _parse_remote(value: str) -> tuple[str, str] | None:
+    """Split a remote file operand at its first colon.
+
+    :param value: Candidate operand in ``DEVICE_ID:PATH`` form.
+    :returns: The nonempty device ID and path, or ``None`` for a local or incomplete operand.
+    """
+    device, separator, path = value.partition(":")
+    return (device, path) if separator and device and path else None
+
+
+@cli.command("completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish", "powershell", "elvish"]))
+def completion_command(shell: str) -> None:
+    """Generate a shell completion script.
+
+    \f
+
+    :param shell: Shell for which to generate a completion script.
+    """
+    if shell == "elvish":
+        commands = " ".join(["interactive", "login", "devices", "artifacts", "deployments",
+                              "terminal", "port-forward", "cp", "completion"])
+        print("set edit:completion:arg-completer[mender-richer-cli] = {|@words|\n"
+              f"  put {commands}\n"
+              "}")
+        return
+    from click.shell_completion import get_completion_class
+    cls = get_completion_class(shell)
+    if cls is None:
+        raise click.ClickException(f"completion is not available for {shell}")
+    comp = cls(cli, {}, "mender-richer-cli", "mender-richer-cli")
+    print(comp.source())
+
+
+def interactive(app: Context) -> None:
+    """Browse accepted devices and dispatch device actions or group deployments.
+
+    :param app: Shared application configuration and API client.
+    """
+    devices = _run(app.api.devices)
+    favorites = Favorites()
+    favorite = favorites.get(app.config.server)
+    initial = next((i for i, d in enumerate(devices) if favorite and d.get("id") == favorite.get("id")), -1)
+    rows = [[device_name(d), str(d.get("id", "")), device_updated(d)] for d in devices]
+    if not rows:
+        _say("No accepted devices were found.")
+        return
+    while True:
+        def toggle(index: int) -> None:
+            """Persist a favorite toggle for a device row.
+
+            :param index: Original index of the device in the picker list.
+            """
+            device = devices[index]
+            favorites.toggle(app.config.server, {"id": str(device["id"]), "name": device_name(device)})
+        selected, initial, _, multi = pick("Select a device", ["Name", "Device ID", "Last contact"], rows,
+                                           device_mode=True, favorite=initial, toggle_favorite=toggle)
+        if not selected:
+            _say("Goodbye.")
+            return
+        if multi:
+            ids = [str(devices[i]["id"]) for i in selected]
+            _interactive_deploy(app, ids)
+            continue
+        _device_menu(app, devices[selected[0]], devices)
+
+
+def _device_menu(app: Context, device: dict[str, Any], devices: list[dict[str, Any]]) -> None:
+    """Run the selected device's action menu until the user returns or quits.
+
+    :param app: Shared application configuration and API client.
+    :param device: Selected device record.
+    :param devices: Device list passed by the picker; currently unused by the menu.
+    :raises SystemExit: The user selects Quit.
+    """
+    device_id = str(device["id"])
+    actions = ["Remote terminal", "TCP port forwarding", "Upload a file", "Download a file",
+               "Deploy an artifact", "Show inventory", "Choose another device", "Quit"]
+    while True:
+        choice, _, _, _ = pick(f"{device_name(device)} ({device_id})", ["Action"], [[x] for x in actions])
+        if not choice or choice[0] == 6:
+            return
+        if choice[0] == 7:
+            raise SystemExit(0)
+        try:
+            if choice[0] == 0:
+                remote.terminal(app.api, device_id)
+            elif choice[0] == 1:
+                mapping = click.prompt("Local port[:remote host:remote port]", default="8000:8000")
+                remote.port_forward(app.api, device_id, "127.0.0.1", [mapping])
+            elif choice[0] == 2:
+                local = Path(click.prompt("Local file", type=click.Path(exists=True, dir_okay=False, path_type=Path)))
+                path = click.prompt("Remote path")
+                if confirm(f"Upload {local} to {device_name(device)}:{path}?", False):
+                    app.api.upload_file(device_id, local, path)
+            elif choice[0] == 3:
+                path = click.prompt("Remote path")
+                destination = Path(click.prompt("Local destination", default="."))
+                if confirm(f"Download {device_name(device)}:{path} to {destination}?", False):
+                    print(f"File saved to {app.api.download_file(device_id, path, destination)}.")
+            elif choice[0] == 4:
+                _interactive_deploy(app, [device_id])
+            elif choice[0] == 5:
+                inventory = app.api.inventory(device_id)
+                pick(f"Inventory for {device_name(device)} ({device_id})", ["Attribute", "Value"],
+                     flatten_inventory(inventory), viewer=True)
+        except (RuntimeError, ValueError, OSError) as exc:
+            _say(f"Error: {exc}")
+
+
+def _interactive_deploy(app: Context, device_ids: list[str]) -> None:
+    """Prompt for an artifact, confirm, and deploy to the selected devices.
+
+    :param app: Shared application configuration and API client.
+    :param device_ids: Identifiers of the selected deployment targets.
+    """
+    artifacts = _run(app.api.artifacts)
+    if not artifacts:
+        _say("No artifacts are available.")
+        return
+    order, _, _, _ = pick("Order artifacts", ["Order"], [["Name"], ["Type"]])
+    if not order:
+        return
+    key = "type" if order[0] == 1 else "name"
+    artifacts.sort(key=(lambda a: (artifact_kind(a).casefold(), a.get("name", "").casefold()))
+                   if key == "type" else (lambda a: (a.get("name", "").casefold(),)))
+    rows = [[a.get("name", ""), artifact_kind(a), a.get("description", "")] for a in artifacts]
+    selected, _, _, _ = pick("Select an artifact", ["Name", "Type", "Description"], rows)
+    if not selected:
+        return
+    artifact = artifacts[selected[0]]
+    if confirm(f"Deploy {artifact.get('name')} to {len(device_ids)} devices?", False):
+        _run(lambda: app.api.deploy(artifact["name"], device_ids))
+        _say("Deployment created.")
+
+
+def main() -> None:
+    """Run the CLI and render expected failures without a traceback.
+
+    :raises SystemExit: An operational or Click error determines a nonzero exit status.
+    """
+    try:
+        cli(standalone_mode=False)
+    except click.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from exc
+    except (RuntimeError, ValueError, OSError) as exc:
+        click.ClickException(str(exc)).show()
+        raise SystemExit(1) from exc
+
+
+if __name__ == "__main__":
     main()
