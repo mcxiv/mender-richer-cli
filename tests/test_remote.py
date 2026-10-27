@@ -20,6 +20,9 @@ def session(monkeypatch):
     console.__enter__.return_value = console
     send = Mock()
     receive = Mock()
+    notification = MagicMock()
+    notification.return_value.__enter__.return_value = notification.return_value
+    monkeypatch.setattr(remote, 'TerminalNotification', notification, raising=False)
     monkeypatch.setattr(remote, 'connect', Mock(return_value=ws))
     monkeypatch.setattr(remote, '_send', send)
     monkeypatch.setattr(remote, '_recv', receive)
@@ -28,7 +31,7 @@ def session(monkeypatch):
     monkeypatch.setattr(remote.sys.stdout, 'isatty', lambda: True)
     monkeypatch.setattr(remote, '_terminal_size', Mock(return_value=(80, 24)))
     monkeypatch.setattr(remote.time, 'monotonic', lambda: 0)
-    return SimpleNamespace(api=api, ws=ws, console=console, send=send, receive=receive)
+    return SimpleNamespace(api=api, ws=ws, console=console, send=send, receive=receive, notify=notification)
 
 
 @pytest.mark.parametrize(('server','skip','scheme'), [('https://example.com',False,'wss'), ('http://example.com',True,'ws')])
@@ -87,6 +90,47 @@ def test_shell_input_output_keepalives_and_ctrl_bracket(session):
     assert sum(v['hdr']['typ']=='pong' for v in sent)==2
     s.ws.close.assert_called_once()
     s.console.__exit__.assert_called_once()
+    s.notify.return_value.update.assert_called()
+
+
+def test_shell_notifies_after_handshake_without_delaying_raw_mode(session, capsys, monkeypatch):
+    monkeypatch.setattr(remote.sys.stdout, 'isatty', lambda: True)
+    session.api.display_name.return_value = 'Bench'
+    session.receive.return_value = message(PROTO_SHELL, 'new', 'session')
+    session.console.poll.return_value = (b'\x1d', False)
+    def notified(*args, **kwargs):
+        session.receive.assert_called_once()
+        session.console.__enter__.assert_called_once()
+        return session.notify.return_value
+    session.notify.side_effect = notified
+    remote.terminal(session.api, 'device')
+    session.notify.assert_called_once_with('Remote terminal connected',
+        'Bench (device) · Ctrl+] to leave', session.console.write)
+    session.console.write.assert_not_called()
+    assert capsys.readouterr().out == ''
+
+
+def test_shell_processes_input_and_output_during_real_notification(session, monkeypatch):
+    import display
+    monkeypatch.setattr(remote, 'TerminalNotification', display.TerminalNotification)
+    now = [0.0]
+    monkeypatch.setattr(remote.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(display.shutil, 'get_terminal_size', lambda: (80, 24))
+    session.api.display_name.return_value = 'Bench'
+    session.receive.side_effect = [message(PROTO_SHELL, 'new', 'session'),
+                                   message(PROTO_SHELL, 'shell', 'session', b'remote prompt')]
+    polls = []
+    def poll(sock):
+        polls.append(now[0])
+        now[0] += 2.5
+        return (b'ls\r', True) if len(polls) == 1 else (b'\x1d', False)
+    session.console.poll.side_effect = poll
+    remote.terminal(session.api, 'device')
+    assert polls == [0.0, 2.5]
+    session.console.write.assert_any_call(b'remote prompt')
+    sent = [call.args[1] for call in session.send.call_args_list]
+    assert any(item.get('body') == b'ls\r' for item in sent)
+    assert b'Connected' not in session.console.write.call_args.args[0]
 
 
 @pytest.mark.parametrize(('protocol','kind','error'), [(PROTO_CONTROL,'close',False), (PROTO_SHELL,'stop',False),
@@ -111,6 +155,7 @@ def test_rejected_shell_never_enters_raw_mode(session, reply):
         remote.terminal(session.api,'device')
     remote.terminal_io.assert_not_called()
     session.ws.close.assert_called_once()
+    session.notify.assert_not_called()
 
 
 def test_shell_timeout_and_noninteractive_input(session, monkeypatch):
@@ -214,6 +259,26 @@ def test_tcp_forwarding_flow_and_disconnect_cleanup(session,monkeypatch,protocol
     local.close.assert_called_once()
     listener.close.assert_called_once()
     session.ws.close.assert_called_once()
+    session.notify.assert_called_once_with('Port forwarding ready',
+        'tcp/127.0.0.1:8080 → tcp/127.0.0.1:80\nCtrl+C to stop')
+
+
+def test_forwarding_notifies_once_after_all_ports_are_bound(session, monkeypatch, capsys):
+    listeners = [Mock(), Mock()]
+    monkeypatch.setattr(remote.socket, 'socket', Mock(side_effect=listeners))
+    session.receive.return_value = message(PROTO_CONTROL, 'accept', 'session',
+        msgpack.packb({'protocols': [PROTO_PORT_FORWARD]}))
+    monkeypatch.setattr(remote.select, 'select', Mock(side_effect=KeyboardInterrupt()))
+    def notified(*args, **kwargs):
+        listeners[0].bind.assert_called_once_with(('127.0.0.1', 8080))
+        listeners[1].bind.assert_called_once_with(('127.0.0.1', 8443))
+        return session.notify.return_value
+    session.notify.side_effect = notified
+    remote.port_forward(session.api, 'device', '127.0.0.1', ['8080:80', '8443:443'])
+    session.notify.assert_called_once_with('Port forwarding ready',
+        'tcp/127.0.0.1:8080 → tcp/127.0.0.1:80\ntcp/127.0.0.1:8443 → tcp/127.0.0.1:443\nCtrl+C to stop',
+        )
+    assert capsys.readouterr().out == ''
 
 
 @pytest.mark.parametrize('protocol',[PROTO_PORT_FORWARD,PROTO_PORT_FORWARD_V2])
@@ -262,6 +327,7 @@ def test_bind_failure_closes_new_listener_and_websocket(session,monkeypatch,mapp
         remote.port_forward(session.api,'device','127.0.0.1',[mapping])
     listener.close.assert_called_once()
     session.ws.close.assert_called_once()
+    session.notify.assert_not_called()
 
 
 def test_remote_route_stop_releases_local_socket(session,monkeypatch):

@@ -17,6 +17,7 @@ import msgpack
 import websocket
 
 from api import DEVICE_CONNECT, MenderAPI
+from display import TerminalNotification
 from terminal_io import terminal_io
 from protocol import (PROTO_CONTROL, PROTO_PORT_FORWARD, PROTO_PORT_FORWARD_V2,
                        PROTO_SHELL, body_value, message, pack_message, unpack_message)
@@ -88,7 +89,7 @@ def terminal(api: MenderAPI, device_id: str) -> None:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise RuntimeError("remote terminal requires an interactive terminal")
     api.require_connected(device_id)
-    print(f"\n{api.display_name(device_id)} ({device_id}) — Remote terminal · Ctrl+] to leave")
+    name = api.display_name(device_id)
     ws = connect(api, device_id)
     session = ""
     try:
@@ -114,10 +115,11 @@ def terminal(api: MenderAPI, device_id: str) -> None:
         if not session:
             raise TimeoutError("timed out creating remote terminal")
 
-        with terminal_io() as console:
-            console.write(b"\r\nConnected. Ctrl+] returns to the device list.\r\n")
+        with terminal_io() as console, TerminalNotification(
+                "Remote terminal connected", f"{name} ({device_id}) · Ctrl+] to leave", console.write) as notification:
             next_resize = time.monotonic() + 0.4
             while True:
+                notification.update()
                 data, readable = console.poll(ws.sock)
                 if data is not None:
                     if not data or b"\x1d" in data:
@@ -275,6 +277,7 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
     listeners: list[socket.socket] = []
     routes: dict[str, Route] = {}
     udp_routes: dict[int, Route] = {}
+    notification = None
     try:
         for mapping in mappings:
             if mapping.protocol == "tcp":
@@ -294,10 +297,13 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
                 routes[connection_id] = route
                 udp_routes[mapping.local_port] = route
                 _open_route(ws, route, session, protocol)
-            print(f"Forwarding {mapping.protocol}/{bind}:{mapping.local_port} → "
-                  f"{mapping.protocol}/{mapping.remote_host}:{mapping.remote_port} · Ctrl+C to stop")
+
+        notification = TerminalNotification("Port forwarding ready", "\n".join(
+            f"{m.protocol}/{bind}:{m.local_port} → {m.protocol}/{m.remote_host}:{m.remote_port}"
+            for m in mappings) + "\nCtrl+C to stop")
 
         while True:
+            notification.update()
             readable, _, _ = select.select([ws.sock, *listeners,
                                              *(r.local for r in routes.values() if not r.udp)], [], [], 0.15)
             if ws.sock in readable:
@@ -372,6 +378,8 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
         except Exception:
             pass
         ws.close()
+        if notification is not None:
+            notification.close()
 
 
 def _open_route(ws: websocket.WebSocket, route: Route, session: str, protocol: int) -> None:

@@ -16,7 +16,7 @@ from rich.console import Console
 from api import (ARTIFACTS, ARTIFACT_LIST, DEPLOYMENTS, DEPLOYMENT_LIST, DEVICES, INVENTORY_DEVICE,
                   MenderAPI, artifact_kind, device_name, device_updated)
 from config import Config, Favorites
-from display import confirm, flatten_inventory, human_size, pick, print_json, show_text, table
+from display import confirm, flatten_inventory, human_size, notify, pick, print_json, show_text, table
 import remote
 
 __version__ = "0.1.1"
@@ -37,11 +37,11 @@ class Context:
 
 
 def _say(text: str) -> None:
-    """Print a status message on standard output.
+    """Show CLI status in a timed notification, or print it outside a terminal.
 
     :param text: Message to print.
     """
-    print(text)
+    notify("Result", text, immediate=True)
 
 
 def _deployment_table(deployment: dict[str, Any], stats: dict[str, Any]) -> None:
@@ -867,7 +867,7 @@ def interactive(app: Context) -> None:
     while True:
         selected, _, _, _ = pick("Main menu", ["View"], [[view] for view in views])
         if not selected:
-            _say("Goodbye.")
+            print("Goodbye.")
             return
         try:
             if selected[0] == 0:
@@ -877,7 +877,7 @@ def interactive(app: Context) -> None:
             else:
                 _interactive_deployments(app)
         except (RuntimeError, ValueError, OSError, click.ClickException) as exc:
-            show_text("Error", str(exc))
+            notify("Error", str(exc))
 
 
 def _interactive_devices(app: Context, group: str | None = None) -> None:
@@ -893,7 +893,7 @@ def _interactive_devices(app: Context, group: str | None = None) -> None:
             members = set(app.api.group_devices(group))
             devices = [device for device in devices if device["id"] in members]
         if not devices:
-            show_text("Devices", "No accepted devices were found." if group is None else "No accepted devices in this group.")
+            notify("Devices", "No accepted devices were found." if group is None else "No accepted devices in this group.")
             return
         favorite = favorites.get(app.config.server)
         initial = next((i for i, d in enumerate(devices) if favorite and d.get("id") == favorite.get("id")), -1)
@@ -950,11 +950,12 @@ def _device_menu(app: Context, device: dict[str, Any], devices: list[dict[str, A
                 path = click.prompt("Remote path")
                 if confirm(f"Upload {local} to {device_name(device)}:{path}?", False):
                     app.api.upload_file(device_id, local, path)
+                    notify("Upload complete", f"{local} uploaded to {path}.")
             elif action == "Download a file":
                 path = click.prompt("Remote path")
                 destination = Path(click.prompt("Local destination", default="."))
                 if confirm(f"Download {device_name(device)}:{path} to {destination}?", False):
-                    show_text("Download complete", str(app.api.download_file(device_id, path, destination)))
+                    notify("Download complete", str(app.api.download_file(device_id, path, destination)))
             elif action == "Deploy an artifact":
                 _interactive_deploy(app, [device_id])
             elif action == "Show inventory":
@@ -967,6 +968,7 @@ def _device_menu(app: Context, device: dict[str, Any], devices: list[dict[str, A
                 device["attributes"] = [a for a in device.get("attributes", [])
                                         if not (a.get("scope") == "tags" and a.get("name") == "name")]
                 device["attributes"].append({"scope": "tags", "name": "name", "value": name})
+                notify("Device renamed", f"Device renamed to {name}.")
             elif action == "Edit tags":
                 _interactive_tags(app, device_id)
                 tags = app.api.tags(device_id)
@@ -977,7 +979,7 @@ def _device_menu(app: Context, device: dict[str, Any], devices: list[dict[str, A
             elif action == "Deployment history":
                 _interactive_deployments(app, device_id)
         except (RuntimeError, ValueError, OSError, click.ClickException) as exc:
-            show_text("Error", str(exc))
+            notify("Error", str(exc))
 
 
 def _interactive_tags(app: Context, device_id: str) -> None:
@@ -996,6 +998,7 @@ def _interactive_tags(app: Context, device_id: str) -> None:
             name = click.prompt("Tag name").strip()
             value = click.prompt("Value", default="", show_default=False)
             app.api.set_tags(device_id, {name: value})
+            notify("Tags updated", f"Tag {name!r} saved.")
         else:
             tag = tags[selected[0] - 1]
             action, _, _, _ = pick(f"Tag {tag['name']}", ["Action"], [["Edit value"], ["Remove tag"]])
@@ -1004,8 +1007,10 @@ def _interactive_tags(app: Context, device_id: str) -> None:
             if action[0] == 0:
                 value = click.prompt("Value", default=str(tag["value"]), show_default=False)
                 app.api.set_tags(device_id, {tag["name"]: value})
+                notify("Tags updated", f"Tag {tag['name']!r} saved.")
             elif confirm(f"Remove tag {tag['name']!r}?", False):
                 app.api.remove_tag(device_id, tag["name"])
+                notify("Tag removed", f"Tag {tag['name']!r} removed.")
 
 
 def _interactive_change_group(app: Context, device_id: str) -> None:
@@ -1024,10 +1029,12 @@ def _interactive_change_group(app: Context, device_id: str) -> None:
     if index == 0:
         if current and confirm(f"Remove device from {current!r}?", False):
             app.api.remove_group_devices(current, [device_id])
+            notify("Group updated", f"Device removed from {current!r}.")
         return
     name = click.prompt("New group name") if index == 1 else groups[index - 2]
     if name != current and confirm(f"Move device from {current or 'no group'} to {name!r}?", False):
         app.api.assign_group(device_id, name)
+        notify("Group updated", f"Device moved to {name!r}.")
 
 
 def _choose_devices(app: Context, title: str, members: set[str] | None = None) -> list[str]:
@@ -1042,7 +1049,7 @@ def _choose_devices(app: Context, title: str, members: set[str] | None = None) -
     if members is not None:
         devices = [device for device in devices if device["id"] in members]
     if not devices:
-        show_text(title, "No accepted devices available.")
+        notify(title, "No accepted devices available.")
         return []
     selected, _, _, _ = pick(title, ["Name", "Device ID"],
                              [[device_name(d), d["id"]] for d in devices], multi_select=True)
@@ -1065,7 +1072,7 @@ def _interactive_groups(app: Context) -> None:
             ids = _choose_devices(app, f"Devices for {name}")
             if ids and confirm(f"Move {len(ids)} devices to {name!r}, replacing previous groups?", False):
                 result = app.api.add_group_devices(name, ids)
-                show_text("Group membership", f"Matched {result['matched_count']} devices; changed {result['updated_count']}.")
+                notify("Group membership", f"Matched {result['matched_count']} devices; changed {result['updated_count']}.")
             continue
         name = groups[selected[0] - 1]
         actions = ["Browse devices", "Add devices", "Remove devices", "Deploy an artifact"]
@@ -1079,18 +1086,18 @@ def _interactive_groups(app: Context) -> None:
             ids = _choose_devices(app, f"Move devices to {name}")
             if ids and confirm(f"Move {len(ids)} devices to {name!r}, replacing previous groups?", False):
                 result = app.api.add_group_devices(name, ids)
-                show_text("Group membership", f"Matched {result['matched_count']} devices; changed {result['updated_count']}.")
+                notify("Group membership", f"Matched {result['matched_count']} devices; changed {result['updated_count']}.")
         elif action == "Remove devices":
             ids = _choose_devices(app, f"Remove devices from {name}", set(app.api.group_devices(name)))
             if ids and confirm(f"Remove {len(ids)} devices from {name!r}?", False):
                 result = app.api.remove_group_devices(name, ids)
-                show_text("Group membership", f"Removed {result['updated_count']} devices.")
+                notify("Group membership", f"Removed {result['updated_count']} devices.")
         else:
             ids = app.api.group_devices(name)
             if ids:
                 _interactive_deploy(app, ids)
             else:
-                show_text("Group deployment", "No devices in this group; no deployment was created.")
+                notify("Group deployment", "No devices in this group; no deployment was created.")
 
 
 def _interactive_deployments(app: Context, device_id: str | None = None) -> None:
@@ -1102,7 +1109,7 @@ def _interactive_deployments(app: Context, device_id: str | None = None) -> None
     while True:
         entries = app.api.device_deployments(device_id) if device_id else app.api.all_pages(DEPLOYMENT_LIST)
         if not entries:
-            show_text("Deployments", "No deployments found.")
+            notify("Deployments", "No deployments found.")
             return
         records = [entry["deployment"] if device_id else entry for entry in entries]
         rows = [[record.get("name", ""), record.get("artifact_name", ""),
@@ -1153,7 +1160,7 @@ def _interactive_deployment_devices(app: Context, deployment_id: str) -> None:
     while True:
         results = app.api.deployment_devices(deployment_id, status)
         if not results:
-            show_text("Device results", "No matching results. Devices appear after checking for updates.")
+            notify("Device results", "No matching results. Devices appear after checking for updates.")
             return
         rows = [[row["id"], row.get("status", ""), row.get("state", ""),
                  row.get("substate", ""), "yes" if row.get("log") else "no"] for row in results]
@@ -1165,7 +1172,7 @@ def _interactive_deployment_devices(app: Context, deployment_id: str) -> None:
         if result.get("log"):
             show_text(f"Log for {result['id']}", app.api.deployment_log(deployment_id, result["id"]))
         else:
-            show_text("Deployment log", "This device has not uploaded a log for this deployment.")
+            notify("Deployment log", "This device has not uploaded a log for this deployment.")
 
 
 def _interactive_deploy(app: Context, device_ids: list[str]) -> None:
@@ -1176,7 +1183,7 @@ def _interactive_deploy(app: Context, device_ids: list[str]) -> None:
     """
     artifacts = _run(app.api.artifacts)
     if not artifacts:
-        _say("No artifacts are available.")
+        notify("Artifacts", "No artifacts are available.")
         return
     order, _, _, _ = pick("Order artifacts", ["Order"], [["Name"], ["Type"]])
     if not order:
@@ -1191,7 +1198,7 @@ def _interactive_deploy(app: Context, device_ids: list[str]) -> None:
     artifact = artifacts[selected[0]]
     if confirm(f"Deploy {artifact.get('name')} to {len(device_ids)} devices?", False):
         _run(lambda: app.api.deploy(artifact["name"], device_ids))
-        _say("Deployment created.")
+        notify("Deployment created", f"Deployment created for {len(device_ids)} devices.")
 
 
 def main() -> None:

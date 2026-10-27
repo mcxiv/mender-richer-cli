@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import textwrap
+import time
 from typing import Any, Callable
 
 try:
@@ -14,6 +17,126 @@ except ImportError:
 from rich.console import Console
 from rich.table import Table
 from rich import box
+
+_notification: dict[str, Any] = {}
+
+
+class TerminalNotification:
+    """Draw a timed ANSI notification without taking over terminal input."""
+
+    def __init__(self, title: str, text: str, write: Callable[[bytes], None] | None = None):
+        self.title = ''.join(c for c in title if c.isprintable())
+        self.text = ''.join(c for c in text if c.isprintable() or c == '\n')
+        self.write = write or self._stdout
+        self.expires = time.monotonic() + 5
+        self.area: tuple[int, int, int, int] | None = None
+        if write is None and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+            print(text)
+            self.expires = time.monotonic()
+
+    @staticmethod
+    def _stdout(data: bytes) -> None:
+        sys.stdout.write(data.decode('utf-8'))
+        sys.stdout.flush()
+
+    def __enter__(self) -> TerminalNotification:
+        self.update()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self.area:
+            top, left, width, height = self.area
+            # shortcut: an ANSI overlay cannot restore covered text; use a compositor if needed.
+            self.write(('\x1b7' + ''.join(f'\x1b[{top + row};{left}H' + ' ' * width
+                                        for row in range(height)) + '\x1b8').encode())
+            self.area = None
+
+    def update(self) -> None:
+        remaining = self.expires - time.monotonic()
+        if remaining <= 0:
+            self.close()
+            return
+        width, height = shutil.get_terminal_size()
+        box_width = min(58, width - 2)
+        if box_width < 6 or height < 6:
+            self.close()
+            return
+        inner = box_width - 4
+        lines = textwrap.wrap(self.text, inner) or ['']
+        lines = lines[:max(1, height - 5)]
+        filled = max(1, int(inner * remaining / 5))
+        content = [self.title, *lines, '█' * filled + '░' * (inner - filled)]
+        border = '+' + '-' * (box_width - 2) + '+'
+        rows = [border, *['| ' + _clip(line, inner) + ' |' for line in content], border]
+        area = (max(1, height - len(rows)), width - box_width, box_width, len(rows))
+        if self.area and self.area != area:
+            self.close()
+        self.area = area
+        top, left, _, _ = area
+        self.write(('\x1b7' + ''.join(f'\x1b[{top + row};{left}H' + line
+                                    for row, line in enumerate(rows)) + '\x1b8').encode('utf-8'))
+
+
+def notify(title: str, text: str, *, immediate: bool = False) -> None:
+    """Show a five-second notification in a picker or immediately for CLI status."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty() or (immediate and curses is None):
+        print(text if immediate else f"{title}: {text}")
+        return
+    _notification.clear()
+    _notification.update(title=title, text=text, expires=None)
+    if immediate:
+        def render(screen: Any) -> None:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            while True:
+                screen.erase()
+                if not _draw_notification(screen):
+                    return
+                screen.refresh()
+                curses.napms(100)
+
+        try:
+            curses.wrapper(render)
+        except curses.error:
+            print(text)
+        finally:
+            _notification.clear()
+
+
+def _draw_notification(screen: Any) -> bool:
+    """Draw a bounded notification with a shrinking lifetime bar."""
+    if not _notification:
+        return False
+    now = time.monotonic()
+    if _notification['expires'] is None:
+        _notification['expires'] = now + 5
+    remaining = _notification['expires'] - now
+    if remaining <= 0:
+        _notification.clear()
+        return False
+    height, width = screen.getmaxyx()
+    box_width = min(58, width - 2)
+    if box_width < 6 or height < 6:
+        return True
+    inner = box_width - 4
+    lines = textwrap.wrap(_notification['text'], inner) or ['']
+    visible = max(1, height - 7)
+    if len(lines) > visible:
+        lines = lines[:visible]
+        lines[-1] = lines[-1][:max(0, inner - 1)] + '…'
+    filled = max(1, int(inner * remaining / 5))
+    content = [_notification['title'], *lines, '█' * filled + '░' * (inner - filled)]
+    top = max(0, height - len(content) - 4)
+    left = width - box_width - 1
+    border = '+' + '-' * (box_width - 2) + '+'
+    for offset, line in enumerate([border, *['| ' + _clip(line, inner) + ' |' for line in content], border]):
+        _put(screen, top + offset, left, line, box_width, curses.A_REVERSE)
+    return True
 
 
 def table(headers: list[str], rows: list[list[Any]]) -> None:
@@ -199,9 +322,16 @@ def pick(title: str, headers: list[str], rows: list[list[str]], *,
             else:
                 hints = "↑/↓ move   PgUp/PgDn page   Home/End jump   type filter   Enter select   Esc back"
             _put(stdscr, height - 2, 1, hints, width - 2, curses.A_DIM)
+            notification_active = _draw_notification(stdscr)
+            stdscr.timeout(100 if notification_active else -1)
             stdscr.refresh()
 
-            key = stdscr.get_wch()
+            try:
+                key = stdscr.get_wch()
+            except curses.error:
+                if notification_active:
+                    continue
+                raise
             if key in ("\x1b", "\x03"):
                 return
             if key in (curses.KEY_UP,):

@@ -321,7 +321,7 @@ class TUITests(unittest.TestCase):
     def test_no_log_flag_does_not_trigger_a_log_request(self):
         self.client.deployment_devices.return_value = [{"id": "one", "status": "pending", "log": False}]
         with patch.object(main, "pick", side_effect=[selected(0), selected(0), selected(None)]), \
-             patch.object(main, "show_text") as viewer:
+             patch.object(main, "notify") as viewer:
             main._interactive_deployment_devices(self.app, "deployment")
         self.client.deployment_log.assert_not_called()
         self.assertIn("has not uploaded", viewer.call_args.args[1])

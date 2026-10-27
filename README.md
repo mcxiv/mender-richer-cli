@@ -56,6 +56,11 @@ mrc "$env:SERVER_MENDER_CLOUD" "$env:TOKEN_MENDER_CLOUD"
 ```
 
 This opens the TUI main menu. Choose **Devices**, **Groups**, or **Deployments**.
+Action results and errors appear as notifications for five seconds, with a
+shrinking countdown bar. You can keep navigating while they are visible.
+Ordinary CLI status messages use the same notification when run in a terminal;
+the command returns to the shell after five seconds. Redirected or piped status
+output stays plain text without a delay.
 You can also run commands directly:
 
 ```bash
@@ -92,6 +97,8 @@ Use `-v` / `--verbose` to log request methods and URLs. For development servers,
 - **Scripting** — JSON output and shell completion for Bash, Zsh, Fish, PowerShell, and Elvish.
 
 Remote terminal and forwarding require a connected device and server-side support.
+Both show a five-second connection notification with a countdown while the
+remote shell or forwarding session is already running.
 
 ## Keyboard controls
 

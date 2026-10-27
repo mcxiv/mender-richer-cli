@@ -28,6 +28,7 @@ def tui(cli_app,monkeypatch):
     cli_app.api.all_pages.return_value=[{'id':'d','name':'deployment'}]
     cli_app.api.device_deployments.return_value=[{'deployment':{'id':'d','name':'deployment'},'device':{'status':'failure'}}]
     monkeypatch.setattr(main,'show_text',Mock())
+    monkeypatch.setattr(main,'notify',Mock())
     monkeypatch.setattr(main,'confirm',lambda *_:True)
     return cli_app
 
@@ -59,7 +60,7 @@ def test_devices_refresh_marking_and_favorites(tui,monkeypatch):
 def test_empty_device_lists(tui,monkeypatch,group):
     tui.api.devices.return_value=[]
     main._interactive_devices(tui,group)
-    main.show_text.assert_called_once()
+    main.notify.assert_called_once()
 
 
 def test_group_device_browser_filters_members(tui,monkeypatch):
@@ -100,7 +101,15 @@ def test_device_menu_operational_errors_stay_in_tui(tui,monkeypatch):
     monkeypatch.setattr(main,'pick',Mock(side_effect=[choice(0),choice()]))
     monkeypatch.setattr(main.remote,'terminal',Mock(side_effect=RuntimeError('offline')))
     main._device_menu(tui,tui.api.devices.return_value[0],[])
-    main.show_text.assert_called_once_with('Error','offline')
+    main.notify.assert_called_once_with('Error','offline')
+
+
+def test_rename_notifies_after_success(tui,monkeypatch):
+    monkeypatch.setattr(main,'pick',Mock(side_effect=[choice(6),choice()]))
+    monkeypatch.setattr(main.click,'prompt',Mock(return_value='Renamed'))
+    main._device_menu(tui,tui.api.devices.return_value[0],[])
+    assert main.device_name(tui.api.devices.return_value[0]) == 'Renamed'
+    main.notify.assert_called_once_with('Device renamed','Device renamed to Renamed.')
 
 
 @pytest.mark.parametrize(('action','confirmed'),[(0,True),(1,True),(1,False),(None,True)])
@@ -165,7 +174,7 @@ def test_group_without_members_is_not_deployed(tui,monkeypatch):
     monkeypatch.setattr(main,'pick',Mock(side_effect=[choice(1),choice(3),choice()]))
     main._interactive_groups(tui)
     tui.api.deploy.assert_not_called()
-    assert 'no deployment' in main.show_text.call_args.args[1]
+    assert 'no deployment' in main.notify.call_args.args[1]
 
 
 @pytest.mark.parametrize('device',[None,'one'])
@@ -201,7 +210,7 @@ def test_empty_or_cancelled_device_results(tui,monkeypatch):
     tui.api.deployment_devices.return_value=[]
     monkeypatch.setattr(main,'pick',Mock(return_value=choice(0)))
     main._interactive_deployment_devices(tui,'d')
-    assert 'checking for updates' in main.show_text.call_args.args[1]
+    assert 'checking for updates' in main.notify.call_args.args[1]
 
 
 @pytest.mark.parametrize('stage',['empty','order-cancel','artifact-cancel','decline','name','type'])
@@ -216,10 +225,13 @@ def test_interactive_artifact_deployment(tui,monkeypatch,stage):
     assert tui.api.deploy.called is (stage in {'name','type'})
     if stage in {'name','type'}:
         assert tui.api.deploy.call_args.args==('z' if stage=='type' else 'a',['one','two'])
+        main.notify.assert_called_once_with('Deployment created','Deployment created for 2 devices.')
+    elif stage != 'empty':
+        main.notify.assert_not_called()
 
 
 def test_root_devices_and_error_recovery(tui,monkeypatch):
     monkeypatch.setattr(main,'pick',Mock(side_effect=[choice(0),choice()]))
     monkeypatch.setattr(main,'_interactive_devices',Mock(side_effect=RuntimeError('offline')))
     main.interactive(tui)
-    main.show_text.assert_called_once_with('Error','offline')
+    main.notify.assert_called_once_with('Error','offline')
