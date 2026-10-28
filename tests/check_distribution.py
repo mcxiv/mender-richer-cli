@@ -24,10 +24,13 @@ def check_distributions(directory: Path, release_tag: str = '') -> str:
     if len(wheels) != 1 or len(sources) != 1:
         raise ValueError('expected exactly one wheel and one source archive')
     expected_modules = {path.name for path in (Path(__file__).resolve().parents[1] / 'src').glob('*.py')}
+    web_files = {'webui/__init__.py', 'webui/index.html', 'webui/app.js', 'webui/style.css'}
     with zipfile.ZipFile(wheels[0]) as wheel:
         names = set(wheel.namelist())
         if not expected_modules <= names:
             raise ValueError(f'wheel is missing application modules: {expected_modules - names}')
+        if not web_files <= names:
+            raise ValueError(f'wheel is missing web files: {web_files - names}')
         metadata_name = next(name for name in names if name.endswith('.dist-info/METADATA'))
         metadata = Parser().parsestr(wheel.read(metadata_name).decode())
         version = metadata['Version']
@@ -43,6 +46,7 @@ def check_distributions(directory: Path, release_tag: str = '') -> str:
         names = {'/'.join(name.split('/')[1:]) for name in source.getnames()}
         required = {'setup.py', 'pyproject.toml', 'requirements.txt', 'README.md',
                     'tests/conftest.py', 'tests/test_protocol.py', 'tests/tui_smoke.py'}
+        required.update('src/' + name for name in web_files)
         if not required <= names:
             raise ValueError(f'source archive is missing required files: {required - names}')
     return version

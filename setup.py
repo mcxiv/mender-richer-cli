@@ -9,13 +9,15 @@ install_requires = (ROOT / "requirements.txt").read_text(encoding="utf-8").split
 
 setuptools.setup(
     name="mender-richer-cli",
-    version="0.1.1",
+    version="2.0.0",
     description="A terminal UI and CLI for managing Mender devices.",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     license="Apache-2.0",
     package_dir={"": "src"},
     py_modules=["main", "api", "config", "display", "protocol", "remote", "terminal_io"],
+    packages=["webui"],
+    package_data={"webui": ["*.html", "*.js", "*.css"]},
     python_requires=">=3.10",
     install_requires=install_requires,
     extras_require={"test": ["pytest>=8", "pytest-cov>=5"]},

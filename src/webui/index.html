@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="mrc-session" content="__SESSION_TOKEN__">
+  <title>Mender · Devices</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">mender<span> / local</span></a>
+    <nav class="view-tabs" aria-label="Main views"><button id="devices-tab" type="button" aria-pressed="true">Devices</button><button id="deployments-tab" type="button" aria-pressed="false">Deployments</button></nav>
+    <span id="server" class="server">Connecting to Mender…</span>
+    <button id="theme-toggle" type="button" aria-pressed="false">Dark mode</button>
+    <button id="refresh" type="button">Refresh</button>
+  </header>
+  <main id="devices-view">
+    <aside class="device-panel" aria-label="Devices">
+      <div class="panel-heading"><h1>Devices</h1><span id="count" class="count">0</span></div>
+      <label class="sr-only" for="search">Search devices</label>
+      <input id="search" type="search" placeholder="Search by name or ID" autocomplete="off">
+      <div class="device-filters">
+        <div><label for="artifact-filter">Artifact</label><select id="artifact-filter"><option value="all">All artifacts</option></select></div>
+        <div><label for="last-seen-filter">Last seen</label><select id="last-seen-filter"><option value="all">Any time</option><option value="1">Past 24 hours</option><option value="7">Past 7 days</option><option value="30">Past 30 days</option><option value="older-30d">More than 30 days ago</option><option value="unknown">Unknown</option></select></div>
+      </div>
+      <button id="clear-filters" class="clear-filters" type="button" disabled>Clear filters</button>
+      <div class="group-heading"><h2>Groups</h2></div>
+      <p id="group-state" class="muted" role="status">Loading groups…</p>
+      <div id="group-filters" class="group-filters" role="group" aria-label="Filter devices by group"></div>
+      <p id="list-state" class="muted" role="status">Loading devices…</p>
+      <ul id="devices" class="device-list"></ul>
+    </aside>
+    <section id="workspace" class="workspace" aria-label="Device controls">
+      <div id="welcome" class="welcome"><div id="welcome-message"><span class="eyebrow">YOUR FLEET</span><h2>Manage your devices from one place.</h2><p>Select a device or group to manage it. Deploy artifacts, monitor deployments, run remote commands, and forward ports—all from your browser.</p></div><section id="group-deploy-card" class="card deployment-card" hidden><span class="eyebrow">GROUP ACTION</span><h3 id="group-deploy-title">Deploy to group</h3><p id="group-deploy-count" class="muted"></p><form id="group-deploy-form"><label for="group-deploy-artifact">Artifact</label><div class="input-row"><select id="group-deploy-artifact" required><option value="">Loading artifacts…</option></select><button class="primary" type="submit">Deploy to group</button></div></form></section></div>
+      <div id="device" hidden>
+        <div class="device-heading"><span class="eyebrow">DEVICE</span><h2 id="device-name"></h2><code id="device-id"></code><p id="last-contact" class="muted"></p></div>
+        <p id="detail-state" role="status" class="muted"></p>
+        <div id="controls" hidden>
+          <div class="cards">
+            <section class="card"><h3>Device name</h3><form id="rename-form"><label for="name">Display name</label><div class="input-row"><input id="name" name="name" required><button type="submit">Save name</button></div></form></section>
+            <section class="card"><h3>Static group</h3><form id="group-form"><label for="group">Group name · leave empty to remove</label><div class="input-row"><input id="group" name="name" list="groups" placeholder="No group"><datalist id="groups"></datalist><button type="submit">Save group</button></div></form></section>
+          </div>
+          <section class="card"><div class="section-heading"><h3>Tags</h3><span class="muted">Changes preserve other tags</span></div><div id="tags"></div><form id="tag-form" class="tag-form"><div><label for="tag-name">Tag name</label><input id="tag-name" name="name" placeholder="site" required></div><div><label for="tag-value">Value</label><input id="tag-value" name="value" placeholder="Paris"></div><button type="submit">Add / update tag</button></form></section>
+          <section class="card deployment-card"><div><span class="eyebrow">SOFTWARE</span><h3>Deploy an artifact</h3><p class="muted">Create a deployment for this device. It installs when the device checks for updates.</p></div><form id="deploy-form"><label for="artifact">Artifact</label><div class="input-row"><select id="artifact" name="artifact" required><option value="">Loading artifacts…</option></select><button class="primary" type="submit">Deploy</button></div></form></section>
+          <section class="card"><div class="section-heading"><h3>Deployment history</h3><span class="muted">Refresh to update status</span></div><div id="history" class="table-scroll"></div><div id="log-panel" hidden><div class="section-heading"><h4 id="log-title">Deployment log</h4><button id="close-log" type="button">Close log</button></div><pre id="log" tabindex="0"></pre></div></section>
+          <section class="card"><h3>Remote command box</h3><p class="muted">Run commands on the device. Full-screen interactive programs are not supported.</p><div class="input-row"><button id="terminal-start" type="button">Connect</button><button id="terminal-stop" type="button" disabled>Disconnect</button><button id="terminal-interrupt" type="button" disabled>Ctrl+C</button><span id="terminal-status" class="muted" role="status">Not connected</span></div><pre id="terminal-output" class="terminal-output" role="log" aria-live="polite" tabindex="0"></pre><form id="terminal-form"><label for="terminal-command">Command</label><div class="input-row"><input id="terminal-command" autocomplete="off" maxlength="4096" disabled><button id="terminal-send" type="submit" disabled>Run</button></div></form></section>
+          <section class="card"><h3>Port forwarding</h3><p class="muted">Forward a local port to a service reachable from this device. Local listeners accept connections from this computer only.</p><form id="forward-form" class="forward-form"><div><label for="forward-protocol">Protocol</label><select id="forward-protocol"><option>tcp</option><option>udp</option></select></div><div><label for="forward-local">Local port</label><input id="forward-local" type="number" min="1" max="65535" required></div><div><label for="forward-host">Remote host</label><input id="forward-host" value="127.0.0.1" required></div><div><label for="forward-port">Remote port</label><input id="forward-port" type="number" min="1" max="65535" required></div><button type="submit">Start forwarding</button></form><div id="forwards" aria-live="polite"></div></section>
+          <details class="card"><summary>Inventory</summary><div id="inventory" class="table-scroll"></div></details>
+        </div>
+      </div>
+    </section>
+  </main>
+  <main id="deployments-view" class="deployment-view" hidden>
+    <aside class="deployment-list-panel" aria-label="Deployment list">
+      <div class="panel-heading"><h1>Deployments</h1></div>
+      <div class="deployment-status-tabs" role="group" aria-label="Filter deployments">
+        <button id="active-deployments-tab" type="button" aria-pressed="true">Active</button>
+        <button id="finished-deployments-tab" type="button" aria-pressed="false">Finished</button>
+      </div>
+      <p class="muted">Browse recent deployments by status.</p>
+      <p id="deployment-list-state" class="muted" role="status">Choose a deployment view.</p>
+      <ul id="deployment-list" class="device-list"></ul>
+      <button id="load-more-deployments" class="load-more" type="button" hidden>Load more deployments</button>
+    </aside>
+    <section class="deployment-workspace" aria-label="Deployment details">
+      <div id="deployment-welcome" class="welcome"><span class="eyebrow">DEPLOYMENTS</span><h2>Select a deployment to see its results.</h2><p>Active deployments include scheduled, pending, and in-progress work.</p></div>
+      <div id="deployment-detail" hidden>
+        <div class="device-heading"><span class="eyebrow">DEPLOYMENT</span><h2 id="deployment-name"></h2><code id="deployment-id"></code></div>
+        <section class="card"><div class="section-heading"><h3>Summary</h3><span id="deployment-progress" class="muted"></span></div><div id="deployment-summary" class="table-scroll"></div><div id="deployment-statistics" class="table-scroll"></div></section>
+        <section class="card"><h3>Device results</h3><div id="deployment-device-results" class="table-scroll"></div><div id="deployment-log-panel" hidden><div class="section-heading"><h4 id="deployment-log-title">Deployment log</h4><button id="close-deployment-log" type="button">Close log</button></div><pre id="deployment-log" tabindex="0"></pre></div></section>
+      </div>
+    </section>
+  </main>
+  <div id="notices" class="notices" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

@@ -10,6 +10,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from threading import Event
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -77,6 +78,75 @@ def _terminal_size() -> tuple[int, int]:
     return tuple(shutil.get_terminal_size(fallback=(80, 40)))
 
 
+def open_terminal_session(api: MenderAPI, device_id: str, width: int, height: int, *,
+                         stop_event: Event | None = None) -> tuple[websocket.WebSocket, str]:
+    """Open the device shell protocol without binding it to local terminal input."""
+    ws = connect(api, device_id)
+    try:
+        _send(ws, message(PROTO_SHELL, "new", properties={"terminal_width": width,
+                                                            "terminal_height": height}))
+        ws.settimeout(0.25)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and (stop_event is None or not stop_event.is_set()):
+            item = _recv(ws)
+            if item is None:
+                continue
+            hdr = item["hdr"]
+            if hdr.get("proto") == PROTO_CONTROL and hdr.get("typ") == "ping":
+                _send(ws, message(PROTO_CONTROL, "pong", hdr.get("sid", "")))
+            elif hdr.get("typ") == "error" or (hdr.get("proto") == PROTO_SHELL and
+                    hdr.get("typ") == "new" and (hdr.get("props") or {}).get("status") == 2):
+                raise RuntimeError(f"remote terminal rejected session: {item.get('body', b'')!r}")
+            elif hdr.get("proto") == PROTO_SHELL and hdr.get("typ") == "new":
+                return ws, hdr.get("sid", "")
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("terminal start cancelled")
+        raise TimeoutError("timed out creating remote terminal")
+    except BaseException:
+        ws.close()
+        raise
+
+
+def terminal_output(ws: websocket.WebSocket, session: str) -> bytes:
+    """Receive one terminal frame, responding to protocol keepalives."""
+    item = _recv(ws)
+    if item is None:
+        return b""
+    hdr = item["hdr"]
+    kind = hdr.get("typ")
+    if hdr.get("proto") == PROTO_CONTROL:
+        if kind == "ping":
+            _send(ws, message(PROTO_CONTROL, "pong", session))
+        elif kind == "close":
+            raise ConnectionError("device closed the terminal session")
+        elif kind == "error":
+            raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
+    elif hdr.get("proto") == PROTO_SHELL:
+        if kind == "shell":
+            return item.get("body", b"")
+        if kind == "ping":
+            _send(ws, message(PROTO_SHELL, "pong", session))
+        elif kind == "stop":
+            raise ConnectionError("device stopped the terminal session")
+        elif kind == "error":
+            raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
+    return b""
+
+
+def send_terminal_input(ws: websocket.WebSocket, session: str, data: bytes) -> None:
+    """Write input bytes to an established device shell."""
+    _send(ws, message(PROTO_SHELL, "shell", session, data))
+
+
+def close_terminal_session(ws: websocket.WebSocket, session: str) -> None:
+    """Ask the device shell to stop and always close its WebSocket."""
+    try:
+        _send(ws, message(PROTO_SHELL, "stop", session))
+    except Exception:
+        pass
+    ws.close()
+
+
 def terminal(api: MenderAPI, device_id: str) -> None:
     """Run a remote shell, restoring terminal settings when the session ends.
 
@@ -90,31 +160,9 @@ def terminal(api: MenderAPI, device_id: str) -> None:
         raise RuntimeError("remote terminal requires an interactive terminal")
     api.require_connected(device_id)
     name = api.display_name(device_id)
-    ws = connect(api, device_id)
-    session = ""
+    width, height = _terminal_size()
+    ws, session = open_terminal_session(api, device_id, width, height)
     try:
-        width, height = _terminal_size()
-        _send(ws, message(PROTO_SHELL, "new", properties={"terminal_width": width,
-                                                            "terminal_height": height}))
-        ws.settimeout(0.25)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            item = _recv(ws)
-            if item is None:
-                continue
-            hdr = item["hdr"]
-            if hdr.get("proto") == PROTO_CONTROL and hdr.get("typ") == "ping":
-                _send(ws, message(PROTO_CONTROL, "pong", hdr.get("sid", "")))
-            elif hdr.get("typ") == "error":
-                raise RuntimeError(f"remote terminal rejected session: {item.get('body', b'')!r}")
-            elif hdr.get("proto") == PROTO_SHELL and hdr.get("typ") == "new":
-                if (hdr.get("props") or {}).get("status") == 2:
-                    raise RuntimeError(f"remote terminal rejected session: {item.get('body', b'')!r}")
-                session = hdr.get("sid", "")
-                break
-        if not session:
-            raise TimeoutError("timed out creating remote terminal")
-
         with terminal_io() as console, TerminalNotification(
                 "Remote terminal connected", f"{name} ({device_id}) · Ctrl+] to leave", console.write) as notification:
             next_resize = time.monotonic() + 0.4
@@ -123,31 +171,12 @@ def terminal(api: MenderAPI, device_id: str) -> None:
                 data, readable = console.poll(ws.sock)
                 if data is not None:
                     if not data or b"\x1d" in data:
-                        _send(ws, message(PROTO_SHELL, "stop", session))
                         break
-                    _send(ws, message(PROTO_SHELL, "shell", session, data))
+                    send_terminal_input(ws, session, data)
                 if readable:
-                    item = _recv(ws)
-                    if item is None:
-                        continue
-                    hdr = item["hdr"]
-                    kind = hdr.get("typ")
-                    if hdr.get("proto") == PROTO_CONTROL:
-                        if kind == "ping":
-                            _send(ws, message(PROTO_CONTROL, "pong", session))
-                        elif kind == "close":
-                            break
-                        elif kind == "error":
-                            raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
-                    elif hdr.get("proto") == PROTO_SHELL:
-                        if kind == "shell":
-                            console.write(item.get("body", b""))
-                        elif kind == "ping":
-                            _send(ws, message(PROTO_SHELL, "pong", session))
-                        elif kind == "stop":
-                            break
-                        elif kind == "error":
-                            raise RuntimeError(f"remote terminal error: {item.get('body', b'')!r}")
+                    output = terminal_output(ws, session)
+                    if output:
+                        console.write(output)
                 if time.monotonic() >= next_resize:
                     new_width, new_height = _terminal_size()
                     if (new_width, new_height) != (width, height):
@@ -156,7 +185,7 @@ def terminal(api: MenderAPI, device_id: str) -> None:
                             "terminal_width": width, "terminal_height": height}))
                     next_resize = time.monotonic() + 0.4
     finally:
-        ws.close()
+        close_terminal_session(ws, session)
 
 
 @dataclass
@@ -228,7 +257,9 @@ class Route:
     peer: Any = None
 
 
-def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -> None:
+def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str], *,
+                 stop_event: Event | None = None, ready_event: Event | None = None,
+                 notify: bool = True) -> None:
     """Negotiate forwarding and relay local TCP/UDP traffic until interrupted.
 
     :param api: Authenticated API client.
@@ -252,7 +283,7 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
         body = msgpack.packb({"versions": [1]}, use_bin_type=True)
         _send(ws, message(PROTO_CONTROL, "open", body=body))
         deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and (stop_event is None or not stop_event.is_set()):
             item = _recv(ws)
             if item is None:
                 continue
@@ -268,6 +299,10 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
                 raise RuntimeError("port forwarding is not enabled on this device")
             session = hdr.get("sid", "")
             break
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("port-forward start cancelled")
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("port-forward start cancelled")
         if not protocol:
             raise TimeoutError("port-forward negotiation timed out")
     except BaseException:
@@ -280,6 +315,8 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
     notification = None
     try:
         for mapping in mappings:
+            if stop_event is not None and stop_event.is_set():
+                return
             if mapping.protocol == "tcp":
                 listener = socket.socket(socket.AF_INET6 if ":" in bind else socket.AF_INET, socket.SOCK_STREAM)
                 listeners.append(listener)
@@ -298,12 +335,16 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
                 udp_routes[mapping.local_port] = route
                 _open_route(ws, route, session, protocol)
 
-        notification = TerminalNotification("Port forwarding ready", "\n".join(
-            f"{m.protocol}/{bind}:{m.local_port} → {m.protocol}/{m.remote_host}:{m.remote_port}"
-            for m in mappings) + "\nCtrl+C to stop")
+        if notify:
+            notification = TerminalNotification("Port forwarding ready", "\n".join(
+                f"{m.protocol}/{bind}:{m.local_port} → {m.protocol}/{m.remote_host}:{m.remote_port}"
+                for m in mappings) + "\nCtrl+C to stop")
 
-        while True:
-            notification.update()
+        if ready_event:
+            ready_event.set()
+        while stop_event is None or not stop_event.is_set():
+            if notification:
+                notification.update()
             readable, _, _ = select.select([ws.sock, *listeners,
                                              *(r.local for r in routes.values() if not r.udp)], [], [], 0.15)
             if ws.sock in readable:
@@ -368,6 +409,8 @@ def port_forward(api: MenderAPI, device_id: str, bind: str, values: list[str]) -
     except KeyboardInterrupt:
         pass
     finally:
+        if ready_event:
+            ready_event.set()
         for local in listeners:
             local.close()
         for route in routes.values():

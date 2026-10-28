@@ -171,6 +171,15 @@ def interactive_command(app: Context) -> None:
     _run(lambda: interactive(app))
 
 
+@cli.command("web")
+@click.option("--port", type=click.IntRange(min=1, max=65535), default=8765, show_default=True)
+@click.pass_obj
+def web_command(app: Context, port: int) -> None:
+    """Serve device controls locally at http://127.0.0.1:8765."""
+    from webui import serve
+    _run(lambda: serve(app.api, port))
+
+
 @cli.command("login")
 @click.option("--username", help="Account email.")
 @click.option("--password", hide_input=True, help="Account password (prefer hidden prompt).")
@@ -845,7 +854,7 @@ def completion_command(shell: str) -> None:
     """
     if shell == "elvish":
         commands = " ".join(["interactive", "login", "devices", "groups", "artifacts", "deployments",
-                              "terminal", "port-forward", "cp", "completion"])
+                              "terminal", "port-forward", "cp", "web", "completion"])
         print("set edit:completion:arg-completer[mender-richer-cli] = {|@words|\n"
               f"  put {commands}\n"
               "}")

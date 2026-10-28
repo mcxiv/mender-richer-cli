@@ -2,7 +2,7 @@
 
 This is just Mender from your terminal, but *richer*.
 
-Manage devices, artifacts, and deployments from an interactive terminal UI or the command line.
+Manage devices, artifacts, and deployments from an interactive terminal UI or the command line. Or if you deeply need a web interface, there's one.
 
 Originally a wrapper around `mender-cli`, it now talks directly to Mender's HTTP and WebSocket APIs. You no longer need to install `mender-cli`.
 
@@ -99,6 +99,41 @@ Use `-v` / `--verbose` to log request methods and URLs. For development servers,
 Remote terminal and forwarding require a connected device and server-side support.
 Both show a five-second connection notification with a countdown while the
 remote shell or forwarding session is already running.
+
+## Local web page
+
+Start device controls in your browser using the same server and token as the CLI:
+
+```bash
+mrc web
+# Or select a server and a different local port:
+mrc --server https://hosted.mender.io web --port 8766
+```
+
+Open the printed URL (by default `http://127.0.0.1:8765`). The server listens only
+on your computer; your Mender token stays in Python and is not shown in the page.
+The header shows the connected organization and account when the Mender server
+provides them. Use **Dark mode** in the header to switch themes; the choice is
+remembered in that browser. Stop the server with Ctrl+C.
+
+The page filters accepted devices by name or ID, installed artifact, last-seen
+time, and static group. Group counts include all devices, ungrouped devices, and
+each group; **Clear filters** resets the search and filters. Selecting a group
+also lets you deploy an artifact to its accepted devices after confirming the
+target count.
+
+The **Deployments** view separates active (scheduled, pending, or in progress)
+from finished deployments. It shows recent deployments in pages of 50; select
+**Load more deployments** to browse older entries. Select one to see aggregate
+progress, state counts, per-device results, and available device logs. Device
+details also include inventory, renaming, tags, group membership, deployment
+history, and individual artifact deployment.
+
+The page also provides a plain remote command box and TCP/UDP port forwarding.
+The command box runs commands line by line; full-screen interactive programs
+are not supported. Forwarded ports bind to 127.0.0.1 on your computer. Action
+notifications disappear after five seconds with a countdown bar. Use the CLI
+for file transfers.
 
 ## Keyboard controls
 
@@ -274,7 +309,7 @@ source archive after all tests and packaging checks pass. The release tag must
 match both the package and CLI version, for example `v0.1.1`. It uses GitHub's
 built-in token and does not publish to PyPI.
 
-## Screenshots
+## A little tour
 
 ### Devices
 
@@ -295,6 +330,24 @@ built-in token and does not publish to PyPI.
 ### Artifacts
 
 ![Artifacts listing](./docs/artifact.png)
+
+### Deployments 
+
+![Deployment listing](./docs/deployments_listing.png)
+
+### Groups
+
+![Groups](./docs/groups.png)
+
+### Local web app
+
+![Web devices](./docs/web_devices.png)
+
+![Web group deploy](./docs/web_group_deploy.png)
+
+![Web remote access](./docs/web_remote_access.png)
+
+![Web deployment](./docs/web_deployment.png)
 
 ## License
 
